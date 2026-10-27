@@ -256,6 +256,9 @@ func For(u *url.URL) (*url.URL, error) {
 	if p, err := fromEnv(u); p != nil || err != nil {
 		return p, err
 	}
+	if noProxy(u.Hostname(), envOf("NO_PROXY", "no_proxy")) {
+		return nil, nil
+	}
 	sys := System()
 	if sys.URL == "" || bypassed(u.Hostname(), sys.Bypass) {
 		return nil, nil
