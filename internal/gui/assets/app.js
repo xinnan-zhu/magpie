@@ -14228,7 +14228,10 @@ function renderKeyAccounts(p) {
     name.onclick = () => {
       const i = input(k.name, t("Name, e.g. Personal or Team"));
       i.className = "rename-in";
+      let over = false;
       const done = (save) => {
+        if (over) return;
+        over = true;
         if (save && i.value.trim() !== (k.name || "")) accountAction("keys/rename", { id: p.id, ref: k.id, name: i.value });
         else renderProviders();
       };
