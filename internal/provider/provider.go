@@ -10,6 +10,8 @@ package provider
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
@@ -47,8 +50,10 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
 type Provider struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	// SSHSource identifies an explicitly managed SSH upstream; it is not a login.
+	SSHSource string `json:"sshSource,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
 	// Was are ids the provider had before it was renamed (see Rename):
 	// a model still picked by one of them reaches it.
 	Was []string `json:"was,omitempty"`
@@ -478,8 +483,10 @@ type Provider struct {
 }
 
 type file struct {
-	Providers []Provider `json:"providers"`
-	Groups    []Group    `json:"groups,omitempty"`
+	revision   string
+	SSHImports map[string]ImportReceipt `json:"sshImports,omitempty"`
+	Providers  []Provider               `json:"providers"`
+	Groups     []Group                  `json:"groups,omitempty"`
 	// Searches are the web search APIs a model's search goes to when no
 	// provider can search (see search_api.go).
 	Searches []SearchAPI `json:"searches,omitempty"`
@@ -536,11 +543,13 @@ func read() (file, error) {
 	var f file
 	b, err := steady.ReadFile(Path())
 	if errors.Is(err, os.ErrNotExist) {
+		f.revision = "missing"
 		return f, nil
 	}
 	if err != nil {
 		return f, &unreadableError{Path(), err}
 	}
+	revision := configRevision(b)
 	// An editor that saves with a byte-order mark leaves JSON that Go's
 	// decoder refuses; read as broken, the file fell back to its .bak, an
 	// older generation without what was saved since (#1821).
@@ -556,8 +565,11 @@ func read() (file, error) {
 			return file{}, &unreadableError{Path(), err}
 		}
 	}
+	f.revision = revision
 	return f, nil
 }
+
+func configRevision(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
 
 // validProviders is providers.json's contents read as the catalog.
 func validProviders(b []byte) bool {
@@ -601,6 +613,23 @@ func Routings() ([]string, error) {
 // file cut short.
 func store(f file) error {
 	p := Path()
+	unlock, held := filelock.Lock(p+".lock", filelock.Wait)
+	defer unlock()
+	if !held {
+		return errors.New("cannot lock providers.json; no changes written")
+	}
+	if f.revision != "" {
+		b, err := os.ReadFile(p)
+		current := configRevision(b)
+		if errors.Is(err, os.ErrNotExist) {
+			current = "missing"
+		} else if err != nil {
+			return err
+		}
+		if current != f.revision {
+			return errors.New("providers changed; refresh and try again")
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}

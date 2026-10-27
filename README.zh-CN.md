@@ -278,6 +278,29 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 - **WSL**：在 Windows 上，WSL 发行版里的 Agent 一样能配置，会话也一样统计。
 - **保持唤醒**、浅色和深色，在 [Omarchy](https://omarchy.org) 上跟随你的主题。
 
+### SSH 远程主机（首版）
+
+桌面应用的「远程主机」页面可通过系统 OpenSSH 管理远端完整的 Magpie。
+先在终端完成 SSH 认证和主机指纹确认，再添加 SSH 别名或 `user@host`。
+可探测用户服务、查看实际配置目录、打开远端 Web，并用远端原有适配器
+连接 Claude Code/Codex、点选模型。插件可关闭，未连接时不启动 SSH。
+
+模型来源可共存：保留远端已有配置；把本机网关作为 SSH 隧道上的 Remote
+Magpie provider；或选择 API providers/显式路由组，预览后新增到远端。
+API 密钥默认不复制，订阅登录态不复制。关闭本机后，远端服务和独立 API
+providers 可继续运行；本机隧道来源会不可用，不自动切换收费线路。
+
+默认由 agent 连接远端 Magpie。启动隧道后，也可在远端终端运行
+`magpie ssh-direct <SSH-provider-id> claude|codex <本机-provider/model>`，
+仅对这一次会话直接使用本机网关，不改 agent 配置文件。
+
+命令行提供 `magpie ssh hosts|add|remove|inspect|install|service|web`。
+首版部署仅支持 Linux amd64/arm64；需兼容版本和带鉴权的 loopback 用户
+Web 服务。正式发布包含 SSH 功能前，可自行构建 Linux CLI，再使用
+`magpie ssh install <主机-id> <binary> <sha256>` 部署。
+完整用法、恢复方式和实机验证限制见 [SSH 管理](docs/subsystems/ssh-management.md)
+及 [验证记录](docs/ssh-validation.md)。
+
 ## 文档
 
 | | |

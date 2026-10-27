@@ -109,12 +109,14 @@ func ownSecret(secret string, keys []Key) (string, error) {
 }
 
 type Key struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Off    bool   `json:"off,omitempty"`
-	LAN    bool   `json:"lan,omitempty"` // default key and durable migration marker
-	Secret string `json:"secret,omitempty"`
-	Masked string `json:"masked,omitempty"`
+	ID string `json:"id"`
+	// Machine keys belong to this computer (SSH tunnels); backups never carry them.
+	Machine bool   `json:"machine,omitempty"`
+	Name    string `json:"name"`
+	Off     bool   `json:"off,omitempty"`
+	LAN     bool   `json:"lan,omitempty"` // default key and durable migration marker
+	Secret  string `json:"secret,omitempty"`
+	Masked  string `json:"masked,omitempty"`
 	// Limit is the key's own budget (#585); nil for none.
 	Limit *Limit `json:"limit,omitempty"`
 	// More are its limits after the first (#2227), each a window of its
@@ -139,6 +141,7 @@ type Key struct {
 // models and the accounts it may use.
 type Identity struct {
 	KeyID, KeyName string
+	Machine        bool
 	Limit          *Limit
 	More           []Limit
 	Models         []string
@@ -263,14 +266,25 @@ func Default(secret string) bool {
 func Export() ([]Key, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	return load()
+	keys, err := load()
+	return slices.DeleteFunc(keys, func(k Key) bool { return k.Machine }), err
 }
 
 // Restore replaces the gateway credentials when restoring their settings.
 func Restore(keys []Key) error {
 	mu.Lock()
 	defer mu.Unlock()
-	return save(slices.Clone(keys))
+	here, err := load()
+	if err != nil {
+		return err
+	}
+	keys = slices.DeleteFunc(slices.Clone(keys), func(k Key) bool { return k.Machine })
+	for _, k := range here {
+		if k.Machine {
+			keys = append(keys, k)
+		}
+	}
+	return save(keys)
 }
 
 func random(n int) (string, error) {
@@ -501,7 +515,7 @@ func Authenticate(secret string) (Identity, bool) {
 			if k.Off {
 				return Identity{}, false
 			}
-			return Identity{KeyID: k.ID, KeyName: k.Name, Limit: k.Limit, More: k.More, Models: k.Models, Accounts: k.Accounts, Quotas: k.Quotas}, true
+			return Identity{KeyID: k.ID, KeyName: k.Name, Machine: k.Machine, Limit: k.Limit, More: k.More, Models: k.Models, Accounts: k.Accounts, Quotas: k.Quotas}, true
 		}
 	}
 	s := settings.Load()
@@ -651,4 +665,29 @@ func save(keys []Key) error {
 		return err
 	}
 	return edit.WriteAtomic(Path(), append(b, '\n'))
+}
+
+// NewMachineKey creates a revocable named key for one SSH connection. It goes
+// through Authenticate and the normal limits. Its secret stays in Go and SSH's
+// stdin, never in the page, a URL, or a process argument.
+func NewMachineKey(name string) (Key, error) {
+	unlock, held := filelock.Lock(Path()+".lock", filelock.Wait)
+	defer unlock()
+	if !held {
+		return Key{}, errors.New("cannot lock gateway keys")
+	}
+	keys, err := load()
+	if err != nil {
+		return Key{}, err
+	}
+	id, err := random(12)
+	if err != nil {
+		return Key{}, err
+	}
+	token, err := random(24)
+	if err != nil {
+		return Key{}, err
+	}
+	k := Key{ID: id, Name: name, Secret: Prefix + token, Machine: true}
+	return k, save(append(keys, k))
 }

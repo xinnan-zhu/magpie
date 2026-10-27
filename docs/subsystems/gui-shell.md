@@ -685,3 +685,12 @@ still follows the existing Not set up folding rules. The dialog explains that
 restoring visibility does not pin an unconfigured agent into the main list.
 See `agent-bulk-visibility.test.cjs` for persistence, partial selection, failed
 saves, narrow layouts and all five languages in Chromium and WebKit.
+
+## SSH desktop page
+
+The optional `ssh` built-in uses the window kernel and kit, with its own page
+assets and translations. Desktop host/connection routes require a real
+desktop Host and the active plugin. Remote agent/import routes run inside the
+existing authenticated Web handler and validate the serving context on every
+request. Closing the backend disposes SSH processes. See
+[SSH management](ssh-management.md) for the control and Web-forward lifetimes.

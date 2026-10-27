@@ -1,0 +1,30 @@
+body.web .ssh-nav { display: none !important; }
+#view-ssh .row-head { margin: 14px 0 6px; padding: 0 2px; gap: 6px; height: auto; min-height: 26px; flex-wrap: wrap; }
+#view-ssh > .row-head:first-child { margin-top: 4px; }
+#view-ssh .row-head .proto { max-width: 40%; }
+#view-ssh .row .sub { white-space: normal; overflow-wrap: anywhere; }
+#view-ssh .val { flex-wrap: wrap; justify-content: flex-end; }
+.ssh-note { padding: 12px 14px; margin: 0; font-size: 12px; line-height: 1.5; }
+.ssh-editor { grid-template-columns: minmax(0, 1fr); }
+.ssh-host-editor { grid-template-columns: 110px minmax(0, 1fr); }
+.ssh-host-editor .ebody > .sub { grid-column: 1 / -1; }
+.ssh-editor .ebody > .sub { margin: 0; line-height: 1.5; font-size: 12px; color: var(--muted); }
+.ssh-input { display: grid; gap: 6px; }
+.ssh-editor label { text-align: left; padding-top: 0; }
+.ssh-host-editor label { text-align: right; padding-top: 5px; }
+.ssh-input input { min-width: 0; }
+.ssh-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px 18px; font-size: 12px; }
+.ssh-facts code, .ssh-command { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.ssh-check { display: flex; align-items: center; gap: 8px; }
+.ssh-snippet { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 7px; background: var(--pill); }
+.ssh-snippet code { flex: 1; min-width: 0; font-size: 12px; }
+.ssh-copy-entry .ssh-command { display: block; margin-top: 6px; }
+@media (max-width: 550px) {
+  #view-ssh .row.pref { flex-wrap: wrap; }
+  #view-ssh .row.pref > .who { flex-basis: 100%; }
+  #view-ssh .row.pref > .val { max-width: 100%; }
+  .ssh-host-editor { grid-template-columns: minmax(0, 1fr); }
+  .ssh-host-editor label { text-align: left; padding-top: 0; }
+  .ssh-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .ssh-facts code { margin-bottom: 8px; }
+}

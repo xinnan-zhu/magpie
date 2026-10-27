@@ -266,7 +266,7 @@ func lanGuard(next http.Handler) http.Handler {
 			writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer a browser that reached it as "+r.Host+" (a web site's name pointed at this computer): call it as localhost or 127.0.0.1, or send an enabled gateway key")
 			return
 		}
-		if remote && !remoteKeyed() {
+		if remote && !remoteKeyed() && sshScope(r) == "" {
 			if viaPagePort(r) {
 				log.Printf("refused %s %s on magpie web's page port: magpie isn't shared", r.Method, r.URL.Path)
 				http.Error(w, "this request came to magpie web's page port, which answers the gateway's routes as from another machine (the port may sit behind a proxy or a forward): only while Settings → Network and sharing → Share on local network is on, with an enabled gateway key (Gateway → Gateway keys) sent as Authorization: Bearer <key> or x-api-key. An agent on this computer calls the gateway's own address ("+URL()+") instead, which needs no key", http.StatusForbidden)
@@ -444,6 +444,10 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 		writeError(w, provider.Chat, http.StatusUnauthorized, msg)
 		return r, false
 	}
+	if ok && who.Machine && sshScope(r) != who.KeyID {
+		writeError(w, provider.Chat, http.StatusUnauthorized, "this machine key is valid only on its SSH ingress")
+		return r, false
+	}
 	if ok {
 		r = r.WithContext(access.WithIdentity(r.Context(), who))
 	}
@@ -569,7 +573,7 @@ func local(r *http.Request) bool {
 		return false
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback() && !proxied(r) && !viaPagePort(r)
+	return ip != nil && ip.IsLoopback() && !proxied(r) && !viaPagePort(r) && sshScope(r) == ""
 }
 
 // forwardHeaders are what a proxy or tunnel adds to a request it passes

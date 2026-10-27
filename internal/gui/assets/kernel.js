@@ -227,7 +227,7 @@
     ui,
     plugin(id, setup) {
       if (plugins.has(id)) throw new Error(`plugin ${id} is registered twice`);
-      const p = { id, config: { ...(window.bootPrefs?.pluginConfig?.[id] || {}) }, onConfig: [], disposers: [] };
+      const p = { id, config: { ...(window.bootPrefs?.pluginConfig?.[id] || {}) }, onConfig: [], disposers: [], active: !window.bootPrefs?.featuresOff?.includes(id) };
       plugins.set(id, p);
       try {
         setup(context(p));
@@ -245,6 +245,15 @@
     call(key, hook, ...args) {
       const page = pages.get(key);
       return page ? run(page, hook, args) : undefined;
+    },
+    // Built-in switches dispose resources when their page leaves the window.
+    setActive(id, on) {
+      const p = plugins.get(id);
+      if (!p || p.active === on) return;
+      p.active = on;
+      if (!on) for (const fn of p.disposers) {
+        try { fn(); } catch (err) { console.error(`[magpie] ${id}: dispose`, err); }
+      }
     },
     // a plugin's words in each language ({ zh: { English: 中文 }, … }),
     // added to i18n.js's; one already there is a mistake, said and not

@@ -1060,3 +1060,32 @@ func StartBeside(exe string, window bool, view string) error {
 	_, _, err := launch(exe, RelaunchArgs(window, view), os.Environ())
 	return err
 }
+
+// DownloadCLI fetches a terminal-only release for a remote host using the same
+// feed, mirror, proxy and checksum verification as local updates. The caller
+// owns the returned private directory and must call cleanup.
+func DownloadCLI(ctx context.Context, osName, arch string) (path, digest string, cleanup func(), err error) {
+	if osName != "linux" || (arch != "amd64" && arch != "arm64") {
+		return "", "", nil, errors.New("unsupported SSH deployment target")
+	}
+	release, err := Latest(ctx)
+	if err != nil {
+		return "", "", nil, err
+	}
+	name := "magpie-cli-" + osName + "-" + arch
+	a, ok := release.Assets[name]
+	if !ok || len(a.SHA256) != 64 {
+		return "", "", nil, errors.New("the release has no verified binary for this host")
+	}
+	dir, err := os.MkdirTemp("", "magpie-ssh-release-")
+	if err != nil {
+		return "", "", nil, err
+	}
+	cleanup = func() { os.RemoveAll(dir) }
+	path = filepath.Join(dir, name)
+	if err = fetch(ctx, a, path); err != nil {
+		cleanup()
+		return "", "", nil, err
+	}
+	return path, a.SHA256, cleanup, nil
+}

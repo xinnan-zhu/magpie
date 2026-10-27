@@ -247,3 +247,11 @@ Settings included, so the form, the saved row and gateway traffic have not
 been tried end to end. As with Cindy and Lody, the TUI leaves the row out
 because there is nothing to pick. `magpie aionui add` opens the link.
 
+
+## SSH-managed agents
+
+The SSH page calls the serving remote process's original Claude Code/Codex
+adapters through authenticated, context-bound routes. Model picks apply at
+once. Drift requires remote Web review, and disconnect rechecks the real
+adapter's preview. `ssh-direct` is a separate per-process launch and writes no
+agent files. See [SSH management](ssh-management.md) for lifecycle and limits.

@@ -12,6 +12,7 @@ import (
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/sshremote"
 	"github.com/yetone/magpie/internal/update"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -29,6 +30,7 @@ var serving sync.WaitGroup
 // stopServing stops this process's gateway taking requests and returns
 // once those in flight have finished.
 func stopServing() {
+	sshremote.Desktop.Close()
 	endBackend()
 	serving.Wait()
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/sshremote"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -48,6 +49,8 @@ const usage = `magpie — one place to pick every agent's model
                                   behind a reverse proxy, MAGPIE_WEB_URL=https://<the page there> prints the link through it
                                   --gateway: gateway mode, no Agents, Sessions or Library (on by itself with no agents here; Settings › General turns it off)
                                   --tls-cert/--tls-key: the page and the gateway over https:// to other computers
+  magpie ssh-control              internal SSH control protocol (no ordinary startup)
+  magpie ssh                     manage remote hosts (magpie ssh help)
   magpie ls                       list detected agents and their settings
   magpie <agent>                  show one agent
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
@@ -183,6 +186,26 @@ func Main(v string) {
 	slices.Sort(ignored)
 	for _, v := range ignored {
 		fmt.Fprintf(os.Stderr, "magpie: ignoring %s: not an absolute path (the programs magpie starts still get it)\n", v)
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "ssh-control" || os.Args[1] == "ssh" || os.Args[1] == "ssh-direct") {
+		gateway.Version = version
+		var err error
+		if os.Args[1] == "ssh-control" {
+			err = sshremote.ServeControl(context.Background(), os.Stdin, os.Stdout, version)
+		} else if os.Args[1] == "ssh-direct" {
+			if len(os.Args) < 5 {
+				err = errors.New("usage: magpie ssh-direct <ssh-provider> claude|codex <model> [agent arguments]")
+			} else {
+				err = sshremote.Direct(context.Background(), os.Args[2], os.Args[3], os.Args[4], os.Args[5:])
+			}
+		} else {
+			err = sshCmd(os.Args[2:])
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "magpie:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if provider.TookOpenedURL(os.Args[1:]) {
 		// Claude Code, signing in for magpie, handed over the page to open

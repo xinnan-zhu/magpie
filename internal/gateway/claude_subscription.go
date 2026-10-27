@@ -127,11 +127,12 @@ var (
 const parkedMost = 16
 
 type subscriptionRun struct {
-	bridge *subscriptionBridge
-	token  string
-	model  string
-	cmd    *exec.Cmd
-	tree   *proc.Tree // cmd once started, with all it starts
+	bridge   *subscriptionBridge
+	sshScope string // immutable transport scope, including tool-result matching
+	token    string
+	model    string
+	cmd      *exec.Cmd
+	tree     *proc.Tree // cmd once started, with all it starts
 	// the read ends of Claude Code's output, and their readers
 	outputs []*os.File
 	reading sync.WaitGroup
@@ -415,6 +416,9 @@ func claudeWorkDir() (string, error) {
 // absolute path to a folder on this computer (a caller elsewhere). The
 // model's own words are not read: what it says is no caller's.
 func clientWorkDir(req *Request) string {
+	if req.sshScope != "" {
+		return ""
+	}
 	dir := clientNamedWorkDir(req)
 	if dir == "" || !filepath.IsAbs(dir) {
 		return ""
@@ -831,7 +835,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	}
 	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 
-	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Format.schema()) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, effort: req.Effort, sessions: sessions, started: time.Now()}
+	run := &subscriptionRun{bridge: b, sshScope: req.sshScope, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Format.schema()) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, effort: req.Effort, sessions: sessions, started: time.Now()}
 	run.owner.Store(&owner)
 	run.names = bridgeNames(req.Tools)
 	run.safeguardBeta = req.SafeguardBeta
@@ -3236,7 +3240,7 @@ func (b *subscriptionBridge) match(req *Request) (*subscriptionRun, []Part, stri
 		b.mu.Lock()
 		for _, p := range fresh {
 			run := b.calls[p.CallID]
-			if run == nil {
+			if run == nil || run.sshScope != req.sshScope {
 				continue
 			}
 			if found != nil && found != run {
@@ -3254,7 +3258,7 @@ func (b *subscriptionBridge) match(req *Request) (*subscriptionRun, []Part, stri
 			h := sha256.New()
 			hashMessages(h, req.Messages, func(int) { before[hex.EncodeToString(h.Sum(nil))] = true })
 		}
-		run, named, w := b.remap(req.Model, calls, fresh, before)
+		run, named, w := b.remap(req.Model, calls, fresh, before, req.sshScope)
 		if run != nil {
 			return run, named, byRemap
 		}
@@ -3275,7 +3279,11 @@ func (b *subscriptionBridge) match(req *Request) (*subscriptionRun, []Part, stri
 // arguments. Only one may be: two conversations that are the same so far,
 // down to their calls, would have their results told to either, and a new
 // run is started instead. The results are returned named by the run's ids.
-func (b *subscriptionBridge) remap(model string, calls, fresh []Part, before map[string]bool) (*subscriptionRun, []Part, string) {
+func (b *subscriptionBridge) remap(model string, calls, fresh []Part, before map[string]bool, scopes ...string) (*subscriptionRun, []Part, string) {
+	scope := ""
+	if len(scopes) != 0 {
+		scope = scopes[0]
+	}
 	if len(calls) == 0 {
 		return nil, nil, noRunWaiting
 	}
@@ -3301,6 +3309,9 @@ func (b *subscriptionBridge) remap(model string, calls, fresh []Part, before map
 	var found *subscriptionRun
 	var ids []string // the run's id for each of calls
 	for _, run := range runs {
+		if run.sshScope != scope {
+			continue
+		}
 		run.mu.Lock()
 		shown, told := slices.Clone(run.shown), run.told
 		waiting := !run.closed && !run.parkedAt.IsZero() && (run.model == "" || model == "" || run.model == model)
@@ -4127,8 +4138,9 @@ func (b *subscriptionBridge) abortAll() {
 
 // lostRun is a run that had a conversation and ended: when, and why.
 type lostRun struct {
-	at  time.Time
-	why string
+	sshScope string
+	at       time.Time
+	why      string
 }
 
 // lostMost is how many ended runs' reasons are kept for the log, by
@@ -4172,7 +4184,7 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	run.mu.Lock()
 	results := slices.Clone(run.results)
 	run.mu.Unlock()
-	lost := lostRun{at: time.Now(), why: why}
+	lost := lostRun{at: time.Now(), why: why, sshScope: run.sshScope}
 	b.mu.Lock()
 	if b.lost == nil {
 		b.lost, b.lostCalls = map[string]lostRun{}, map[string]lostRun{}
@@ -4330,7 +4342,7 @@ func (b *subscriptionBridge) whyCallsLost(req *Request) string {
 	defer b.mu.Unlock()
 	for _, m := range req.Messages[i:] {
 		for _, p := range m.Parts {
-			if l, ok := b.lostCalls[p.CallID]; ok && p.Kind == ToolResult {
+			if l, ok := b.lostCalls[p.CallID]; ok && p.Kind == ToolResult && l.sshScope == req.sshScope {
 				return "the run that made the calls ended " + time.Since(l.at).Round(time.Second).String() + " ago: " + l.why
 			}
 		}
@@ -4341,6 +4353,9 @@ func (b *subscriptionBridge) whyCallsLost(req *Request) string {
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
 	defer s.bridgeTurn()()
 	owner := p.ID
+	if scope := sshScope(r); scope != "" {
+		owner += "@ssh:" + scope
+	}
 	if p.Account != nil {
 		owner += "\x00" + p.Account.User
 		if p.Account.AgentsOwn() {
@@ -4435,6 +4450,7 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
 	req.Model = model
+	req.sshScope = sshScope(r)
 	if req.clientCache != nil {
 		req.clientCache.report = func() { cacheReportReady(w, req) }
 	}

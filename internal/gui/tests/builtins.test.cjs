@@ -30,6 +30,7 @@ const PLUGINS = [
   { id: "routing", name: "Routing", sub: "Each request as the gateway routes it, the accounts it weighed and what each answered, and your routing groups", one: "1 group in use", many: "{n} groups in use" },
   { id: "search", name: "Web search", sub: "Models that can't search the web search with a provider that can, or a search API", one: "1 search source set up", many: "{n} search sources set up" },
   { id: "sessions", name: "Sessions", sub: "Your agents' past conversations: read, search, resume and export them", one: "Recording gateway conversations", many: "Recording gateway conversations" },
+  { id: "ssh", name: "SSH remote hosts", sub: "Manage another computer's Magpie through system SSH" },
   { id: "tools", name: "Plugin tools", sub: "Offer the tools your plugins give to every agent, as an MCP server", one: "1 plugin gives tools", many: "{n} plugins give tools" },
   { id: "usage", name: "Usage", sub: "Your allowances, what was spent and on what, each request, and what filled the context window" },
   { id: "warmups", name: "Warm-up and check-in", sub: "Start a subscription's usage window at a time you pick, and claim vendors' daily check-in credits", one: "1 warm-up or check-in on", many: "{n} warm-ups and check-ins on" },
@@ -38,7 +39,7 @@ const PLUGINS = [
 // and Usage pages, the routing strategies, the gateway middleware, privacy
 // masking, web search, key limits and plugin tools, which are essential,
 // and two routing groups the user made
-const START = { budget: [true, 0], gateway: [true, 0], groups: [false, 2], library: [false, 0], middleware: [true, 0], otel: [false, 0], redact: [true, 0], rotation: [true, 0], routing: [true, 0], search: [true, 0], sessions: [false, 0], tools: [true, 0], usage: [true, 0], warmups: [false, 0] };
+const START = { budget: [true, 0], gateway: [true, 0], groups: [false, 2], library: [false, 0], middleware: [true, 0], otel: [false, 0], redact: [true, 0], rotation: [true, 0], routing: [true, 0], search: [true, 0], sessions: [false, 0], ssh: [false, 0], tools: [true, 0], usage: [true, 0], warmups: [false, 0] };
 
 // the Gateway page's settings, as pluginrt.SchemaOf makes them
 const GATEWAY_SCHEMA = {

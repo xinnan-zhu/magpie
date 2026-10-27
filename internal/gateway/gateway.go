@@ -3903,6 +3903,9 @@ func sinceStart(before, d time.Duration) int64 {
 // attempt sends a request to one provider. call.To stays empty when the
 // provider has no endpoint to send it to.
 func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, call *Call) (int, string) {
+	if sshScope(r) != "" && p.IsRemoteMagpie() {
+		return writeError(w, from, 400, "SSH requests cannot route through another Remote Magpie provider"), "SSH Remote Magpie loop refused"
+	}
 	// Normalize for the actual destination, separately on each fallback.
 	// Native ChatGPT accounts accept standalone tool outputs themselves.
 	if from == provider.Responses && (p.Account == nil || p.Account.Agent != "codex") {
@@ -4177,6 +4180,9 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 
 // forwardOnce is one request to the provider, as forward makes it.
 func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provider.Protocol, path string, body []byte, in http.Header) (*http.Response, error) {
+	if scope, _ := ctx.Value(sshTransport{}).(string); scope != "" && p.IsRemoteMagpie() {
+		return nil, errors.New("SSH requests cannot route through another Remote Magpie provider")
+	}
 	ctx = s.metered(p.Via(ctx), p, "")
 	body = deepseekToolPatterns(p, to, body)
 	body = grokToolPatterns(p, to, body)

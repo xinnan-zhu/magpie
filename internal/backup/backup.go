@@ -183,7 +183,7 @@ func Collect(keys bool, app string) (Bundle, error) {
 		}
 	}
 	for _, p := range stored {
-		if !keys {
+		if !keys || p.SSHSource != "" {
 			p = withoutKeys(p)
 		}
 		b.Providers = append(b.Providers, p)

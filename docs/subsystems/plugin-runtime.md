@@ -502,3 +502,15 @@ remembering its layer (`Source`):
   every language, 1100 and 420 points.
 - By hand, under a sandbox HOME: `magpie plugin builtin`, `magpie plugin
   builtin on groups`, `magpie plugin dump`, and a plugins.yml broken by hand.
+
+## SSH page lifetime
+
+The `ssh` built-in requires `window` and contributes `nav.page/ssh`. Applying it
+enables a dormant connection manager; only a user action starts SSH. Disposal
+cancels pending connections and closes active tunnels, proxies and their
+revocable keys. The window kernel now invokes its existing `ctx.onDispose` callbacks when
+`applyFeatures` changes a built-in from on to off. Re-enabling retains the page
+registration but starts without its old connection snapshot. The browser page
+disposes its selected connection too. Its
+assets use slots, kit and plugin-local translations. See
+[SSH management](ssh-management.md).

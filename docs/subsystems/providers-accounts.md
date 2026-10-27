@@ -303,3 +303,14 @@ real `~/.codex`, `~/.claude`, `~/.config/gcloud` or `~/.config/magpie` files.
 Vertex AI's tests send Vertex AI, Google's token endpoint and IAM Credentials
 to a server of their own (`VertexForTest`). Check a change
 against real accounts in a sandbox HOME, as [Code standards](../code-standards.md#acceptance-criteria) describes.
+
+## SSH setup imports and upstreams
+
+[SSH management](ssh-management.md) adds API providers and explicit groups by
+selection, with credentials opt-in and new remapped IDs. It keeps subscriptions
+and machine settings out. Import receipts and configuration revisions live in
+providers.json; all stores compare the revision read under its strict file
+lock, so a stale writer now returns an error instead of replacing another
+process's edit. A managed SSH Remote Magpie provider's `SSHSource` identifies
+its originating machine/context and host entry. Reconnect changes its key only
+when source and endpoints still match, preserving the user's model picks.

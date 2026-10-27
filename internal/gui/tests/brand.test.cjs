@@ -42,7 +42,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
     // in the header's row, and at the sidebar's top when the window is wide
-    for (const width of [860, 1100]) for (const c of cases) {
+    // All default pages include SSH now; 960 still exercises the header
+    // with room for its brand, below the sidebar threshold of 1024.
+    for (const width of [960, 1100]) for (const c of cases) {
       const context = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" });
       await context.addInitScript((p) => Object.defineProperty(Navigator.prototype, "platform", { get: () => p }), c.platform);
       const page = await context.newPage();

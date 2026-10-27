@@ -790,3 +790,13 @@ go test -tags nogui ./internal/gateway/ -run 'TestClaudeTaskNotification|TestWit
 rule that keeps another conversation out; `claude_lost_media_test.go` does
 the same for images taken out, from Hana's request bodies. `claude_resume_test.go`'s harness
 stands in for Claude Code with a script that keeps sessions as it does.
+
+## SSH transport scope
+
+[SSH management](ssh-management.md) shares this server's bridge rather than
+creating another bridge with callbacks on the main port. A private transport
+context scopes a run's owner, exact tool IDs and remapped continuations to
+one SSH connection. Such a run does not use a remote client-supplied path as
+the local Claude bridge's working directory. This special bridge behavior
+does not change ordinary API forwarding or the remote agent's tool directory.
+Local runs use the existing empty scope.

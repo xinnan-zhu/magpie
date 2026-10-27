@@ -29,7 +29,7 @@ clone a working tree or synchronize arbitrary files.
   the remote bundle, first keeping the local setup for Undo.
 - [`backup.go`](../../internal/gui/backup.go), the Settings form in
   [`app.js`](../../internal/gui/assets/app.js) and
-  [`webdav_cli.go`](../../webdav_cli.go) reach the same sync operations.
+  [`webdav_cli.go`](../../internal/cli/webdav_cli.go) reach the same sync operations.
 
 ## What stays on each computer
 
@@ -209,3 +209,13 @@ Go tests use `testenv` homes and HTTP fixtures. Browser tests use isolated
 API fixtures in Chromium and WebKit. A live GitHub write requires a test
 repository and token; fixture tests do not establish that a particular
 account's permissions or repository rules allow commits.
+
+## SSH-local state
+
+[SSH management](ssh-management.md) stores host descriptions outside the
+portable bundle. Its `access.Key.Machine` credentials are omitted by Export;
+Restore rejects incoming machine keys and preserves this computer's own.
+Selective SSH copies reuse provider/group data, not a complete Collect or
+Restore, and never bring subscription sign-ins, agent files or network settings.
+The managed remote provider's tunnel credential is also stripped even from a
+backup that includes API keys; a copied upstream needs a new SSH connection.

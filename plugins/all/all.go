@@ -14,6 +14,7 @@ import (
 	_ "github.com/yetone/magpie/plugins/routing"
 	_ "github.com/yetone/magpie/plugins/search"
 	_ "github.com/yetone/magpie/plugins/sessions"
+	_ "github.com/yetone/magpie/plugins/ssh"
 	_ "github.com/yetone/magpie/plugins/tools"
 	_ "github.com/yetone/magpie/plugins/usage"
 	_ "github.com/yetone/magpie/plugins/warmups"

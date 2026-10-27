@@ -23333,7 +23333,10 @@ function navHides() {
 function applyFeatures(list) {
   if (!Array.isArray(list)) return;
   // each plugin's settings to its code in the page (kernel.js)
-  for (const f of list) if (f.schema) magpie.configure(f.id, f.config);
+  for (const f of list) {
+    magpie.setActive(f.id, f.on);
+    if (f.schema) magpie.configure(f.id, f.config);
+  }
   const off = new Set(list.filter((f) => !f.on).map((f) => f.id));
   if (off.size === featuresOff.size && [...off].every((id) => featuresOff.has(id))) return;
   featuresOff = off;
