@@ -82,7 +82,7 @@ magpie.plugin("ssh", (ctx) => {
       save.disabled = cancel.disabled = true;
       try {
         const h = await api("ssh/hosts", { id: existing.id || "", name: inputs.name.value, target: inputs.target.value, port: Number(inputs.port.value) || 0, binary: inputs.binary.value });
-        if (!editing(ed)) return; await forget(); selected = h.id; closeModal(); await load();
+        if (!editing(ed)) return; existing = h; await forget(); selected = h.id; await load(); if (editing(ed)) closeModal();
       } catch (e) { if (editing(ed)) status(e.message, "err"); }
       finally { save.disabled = cancel.disabled = false; }
     }, "text primary");

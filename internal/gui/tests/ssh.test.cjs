@@ -17,6 +17,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       const page = await context.newPage(); page.setDefaultTimeout(5000);
       const errors = [], posted = [];
       let configState = 'ready';
+      let pauseHostRefresh = false, releaseHostRefresh;
+      const hostRefreshGate = new Promise(resolve => { releaseHostRefresh = resolve; });
       page.on('pageerror', e => errors.push(e.message));
       const hosts = [{id:'a',name:'Fixture A',target:'user@fixture-a'},{id:'b',name:'Fixture B',target:'fixture-b'}];
       const agents = [{id:'claude',name:'Claude Code',path:'/remote/.claude/settings.json',wired:false,fields:[{key:'model',value:'magpie/api/one',options:[{value:'magpie/api/one',label:'One'},{value:'magpie/api/two',label:'Two'}]}]}];
@@ -36,7 +38,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
           return json(configState === 'empty' ? [] : ['fixture-config','other-config']);
         }
         if(url.pathname === '/api/ssh/hosts') {
-          if(req.method() === 'GET') return json(hosts);
+          if(req.method() === 'GET') { if(pauseHostRefresh) await hostRefreshGate; return json(hosts); }
           const h = {...req.postDataJSON(),id:req.postDataJSON().id || 'added'};
           const i = hosts.findIndex(v => v.id === h.id);
           if(i < 0) hosts.push(h); else hosts[i] = h;
@@ -74,7 +76,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       assert.equal(await page.locator('#ssh-host-name').inputValue(),'fixture-config');
       assert.ok(await hostEditor.evaluate(v => v.scrollWidth <= v.clientWidth + 1),`${lang} ${width}: host editor fits`);
       if(process.env.ARTIFACT_DIR && lang === 'zh') await page.screenshot({animations:'disabled',path:path.join(process.env.ARTIFACT_DIR,`ssh-host-${engine}-${width}.png`)});
+      pauseHostRefresh = true;
+      const refreshRead = page.waitForRequest(req => new URL(req.url()).pathname === '/api/ssh/hosts' && req.method() === 'GET');
       await hostEditor.getByRole('button',{name:words('Save'),exact:true}).click();
+      await refreshRead;
+      assert.equal(await page.locator('#modal').evaluate(v => v.hidden || v.classList.contains('out')),false,'finish the host refresh before returning to row actions');
+      releaseHostRefresh(); pauseHostRefresh = false;
       await page.waitForFunction(() => document.querySelector('#modal').hidden);
       const configured = posted.find(([p]) => p === '/api/ssh/hosts')[1];
       assert.equal(configured.target,'fixture-config');
