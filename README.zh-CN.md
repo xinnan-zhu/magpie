@@ -281,7 +281,8 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 ### SSH 远程主机（首版）
 
 桌面应用的「远程主机」页面可通过系统 OpenSSH 管理远端完整的 Magpie。
-先在终端完成 SSH 认证和主机指纹确认，再添加 SSH 别名或 `user@host`。
+先在终端完成 SSH 认证和主机指纹确认，再从本机 `~/.ssh/config` 选择已有主机，
+或手动填写 SSH 别名、`user@host` 和可选端口。选择已有配置时沿用其密钥和跳板机设置。
 可探测用户服务、查看实际配置目录、打开远端 Web，并用远端原有适配器
 连接 Claude Code/Codex、点选模型。插件可关闭，未连接时不启动 SSH。
 

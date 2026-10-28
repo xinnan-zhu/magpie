@@ -52,6 +52,14 @@ func sshRoutes(mux *http.ServeMux, w Windows) {
 		return true
 	}
 	sshDesktopOperations(mux, desktop)
+	mux.HandleFunc("GET /api/ssh/config-hosts", desktop(func(rw http.ResponseWriter, r *http.Request) {
+		hosts, err := sshremote.ConfigHosts()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, hosts)
+	}))
 	mux.HandleFunc("GET /api/ssh/hosts", desktop(func(rw http.ResponseWriter, r *http.Request) {
 		hs, err := sshremote.Hosts()
 		if err != nil {

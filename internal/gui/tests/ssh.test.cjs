@@ -16,6 +16,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       const context = await browser.newContext({viewport:{width,height:820},reducedMotion:'reduce'});
       const page = await context.newPage(); page.setDefaultTimeout(5000);
       const errors = [], posted = [];
+      let configState = 'ready';
       page.on('pageerror', e => errors.push(e.message));
       const hosts = [{id:'a',name:'Fixture A',target:'user@fixture-a'},{id:'b',name:'Fixture B',target:'fixture-b'}];
       const agents = [{id:'claude',name:'Claude Code',path:'/remote/.claude/settings.json',wired:false,fields:[{key:'model',value:'magpie/api/one',options:[{value:'magpie/api/one',label:'One'},{value:'magpie/api/two',label:'Two'}]}]}];
@@ -29,11 +30,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         if(url.pathname === '/api/state') return json({agents:[],profiles:[],settings:{lang,theme:'light'}});
         if(url.pathname === '/api/providers') return json({providers:[],gateway:{running:true,window:true}});
         if(url.pathname === '/api/groups') return json({groups:[]});
-        if(url.pathname === '/api/ssh/hosts') return json(hosts);
         if(req.method() !== 'GET') posted.push([url.pathname, req.postDataJSON()]);
+        if(url.pathname === '/api/ssh/config-hosts') {
+          if(configState === 'error') return route.fulfill({status:500,body:'fixture read failure'});
+          return json(configState === 'empty' ? [] : ['fixture-config','other-config']);
+        }
+        if(url.pathname === '/api/ssh/hosts') {
+          if(req.method() === 'GET') return json(hosts);
+          const h = {...req.postDataJSON(),id:req.postDataJSON().id || 'added'};
+          const i = hosts.findIndex(v => v.id === h.id);
+          if(i < 0) hosts.push(h); else hosts[i] = h;
+          return json(h);
+        }
         if(url.pathname === '/api/ssh/connections') {
           await held;
-          return json({id:'snapshot-a',host:hosts[0],inspection:{installed:true,compatible:true,ready:true,service:{Installed:true,Running:true},context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
+          return json({id:'snapshot-a',host:hosts.find(h => h.id === req.postDataJSON().host),inspection:{installed:true,compatible:true,ready:true,service:{Installed:true,Running:true},context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
         }
         if(url.pathname.endsWith('/agents')) return json(agents);
         if(url.pathname.endsWith('/pick')) { agents[0].fields[0].value=req.postDataJSON().value; return json({agents}); }
@@ -52,9 +63,40 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       await view.getByRole('button',{name:words('Add SSH host'),exact:true}).click();
       const hostEditor = page.locator('.ssh-editor');
       assert.equal(await hostEditor.getByRole('textbox').count(),3);
+      const configPicker = page.locator('#ssh-host-config');
+      await configPicker.waitFor();
+      await page.waitForFunction(() => !document.querySelector('#ssh-host-config').disabled);
+      await configPicker.click();
+      await page.getByText('fixture-config',{exact:true}).last().click();
+      assert.equal(await page.locator('#ssh-host-target').inputValue(),'fixture-config');
+      assert.equal(await page.locator('#ssh-host-target').isEditable(),false);
+      assert.equal(await page.locator('#ssh-host-port').isDisabled(),true);
+      assert.equal(await page.locator('#ssh-host-name').inputValue(),'fixture-config');
       assert.ok(await hostEditor.evaluate(v => v.scrollWidth <= v.clientWidth + 1),`${lang} ${width}: host editor fits`);
       if(process.env.ARTIFACT_DIR && lang === 'zh') await page.screenshot({animations:'disabled',path:path.join(process.env.ARTIFACT_DIR,`ssh-host-${engine}-${width}.png`)});
-      await hostEditor.getByRole('button',{name:words('Cancel'),exact:true}).click();
+      await hostEditor.getByRole('button',{name:words('Save'),exact:true}).click();
+      await page.waitForFunction(() => document.querySelector('#modal').hidden);
+      const configured = posted.find(([p]) => p === '/api/ssh/hosts')[1];
+      assert.equal(configured.target,'fixture-config');
+      assert.equal(configured.port,0,'inherit the configured port instead of overriding it with 22');
+      assert.equal(posted.filter(([p]) => p === '/api/ssh/connections').length,0,'saving does not connect');
+      await view.getByRole('button',{name:words('Host actions'),exact:true}).click();
+      await page.getByRole('menuitem',{name:words('Edit'),exact:true}).click();
+      await page.waitForFunction(() => !document.querySelector('#ssh-host-config').disabled);
+      assert.equal(await configPicker.innerText(),'fixture-config');
+      await configPicker.click();
+      await page.getByText(words('Enter manually'),{exact:true}).last().click();
+      assert.equal(await page.locator('#ssh-host-target').isEditable(),true);
+      assert.equal(await page.locator('#ssh-host-port').isEnabled(),true);
+      await page.locator('#ssh-host-name').fill('Manual fixture');
+      await page.locator('#ssh-host-target').fill('user@manual.test');
+      await page.locator('#ssh-host-port').fill('2222');
+      await hostEditor.getByRole('button',{name:words('Save'),exact:true}).click();
+      await page.waitForFunction(() => document.querySelector('#modal').hidden);
+      const manual = posted.filter(([p]) => p === '/api/ssh/hosts').at(-1)[1];
+      assert.equal(manual.id,'added');
+      assert.equal(manual.target,'user@manual.test');
+      assert.equal(manual.port,2222);
       await view.getByRole('button',{name:words('Connect'),exact:true}).click();
       await page.waitForFunction(() => [...document.querySelectorAll('#view-ssh button')].every(b => b.disabled));
       resolveConnect();
@@ -101,6 +143,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       await page.evaluate(() => { applyFeatures([{id:'ssh',on:true}]); show('ssh'); });
       await view.getByRole('button',{name:words('Connect'),exact:true}).waitFor();
       assert.equal(await view.getByRole('button',{name:words('Open remote Web'),exact:true}).count(),0,'no stale connection after enabling again');
+      for (const state of ['empty','error']) {
+        configState = state;
+        await view.getByRole('button',{name:words('Add SSH host'),exact:true}).click();
+        const note = state === 'empty' ? 'No hosts found in ~/.ssh/config. Enter a destination manually.' : 'Could not read SSH configuration. Enter a destination manually.';
+        await hostEditor.getByText(words(note),{exact:true}).waitFor();
+        assert.equal(await page.locator('#ssh-host-target').isEditable(),true);
+        assert.equal(await page.locator('#ssh-host-port').isEnabled(),true);
+        await hostEditor.getByRole('button',{name:words('Cancel'),exact:true}).click();
+      }
+      assert.deepEqual(errors,[],`${lang} ${width}: configuration choices`);
       await context.close();
     }
   });

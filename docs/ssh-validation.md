@@ -37,14 +37,43 @@ server, subscription account, or installed Claude Code/Codex version.
 | SSH page, host form, model pick, copy preview, tunnel setup and plugin off/on | Passed in Chromium and WebKit; en, zh, zh-TW, ja, de; 1100/420px |
 | Navigation, brand, built-in switches, browser gateway mode | Passed after updating SSH-aware fixtures; final lifecycle run also passed gateway mode |
 | i18n completeness, duplicate keys and plugin ownership | Passed |
-| `make test-ui` (922 files, both engines) | In progress; not a green full-suite result |
+| `make test-ui` (922 files, both engines) | Earlier run stopped before its summary and recorded failures; not a green full-suite result |
 | Formatting and `git diff --check` | Passed |
 
 Long checks use `GOMAXPROCS=2` and `-p 2`; browser files use concurrency 1–2.
-The full browser run initially found the key-name editor double completion,
+The earlier browser run initially found the key-name editor double completion,
 old navigation fixtures and launch/page timeouts during concurrent builds. The editor
 is fixed, navigation fixtures include SSH, and affected files are rerun
-separately. Individual reruns do not make the unfinished full run green.
+separately. Later failures in routing, subscription notices, sync, search and
+update checks remain untriaged in that incomplete run. Individual reruns do
+not make the unfinished full run green.
+
+### SSH configuration picker follow-up (2026-10-28)
+
+The host form now selects concrete local SSH aliases or accepts a manual
+destination and port. Configuration fixtures cover nested/glob/quoted Includes,
+cycles, multiple aliases, wildcard exclusion, malformed/unreadable files and
+size limits. Discovery never launches SSH or opens an IdentityFile. The desktop
+API rejects browser mode and a disabled SSH plugin. Selecting an alias saves
+the alias with no port override; saving does not start a connection.
+
+- Passed `go test -race -count=20 -tags nogui ./internal/sshremote ./internal/gui
+  -run 'TestSSHConfig|TestSSHRemoteRoutes|TestCoreScriptBudget'` under an
+  isolated HOME.
+- Passed macOS, Linux amd64 and Windows amd64 vet and builds. The preview
+  binary was rebuilt with the final form assets.
+- Passed the SSH page plus i18n completeness, ownership, Traditional Chinese,
+  Japanese and German checks: 15 top-level tests, Chromium and WebKit,
+  five languages and 1100/420px. The page tests exercise selecting, saving,
+  editing, switching to manual input, empty/failed config reads and disposal.
+- Negative Go overlay ignoring Include directives: `TestSSHConfigHosts`
+  failed with missing included aliases; the unchanged implementation passes.
+- New full Go and GUI runs are in progress, not green results. Logs are
+  `/private/tmp/magpie-ssh-config-suite.log` and
+  `/private/tmp/magpie-ssh-config-gui-suite.log`; matching `.exit` files contain
+  the exit status when each finishes. The GUI run uses concurrency 1.
+- Formatting and `git diff --check` passed. No real SSH host or credentials
+  were used; real host policies and agent sessions remain unverified.
 
 The concurrency command is:
 

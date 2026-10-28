@@ -49,6 +49,25 @@ magpie.plugin("ssh", (ctx) => {
   function addHost(existing = {}) {
     const ed = editor(); ed.classList.add("ssh-host-editor");
     ed.append(heading(t(existing.id ? "Edit" : "Add SSH host")));
+    const configLabel = el("label", "", t("SSH configuration")), configSlot = el("div", "ssh-config-picker");
+    configLabel.htmlFor = "ssh-host-config"; ed.append(configLabel, configSlot);
+    let aliases = [], selectedAlias = "";
+    function configFields() {
+      inputs.target.readOnly = !!selectedAlias; inputs.port.disabled = !!selectedAlias;
+      for (const key of ["target", "port"]) inputs[key].hidden = inputs[key].labels[0].hidden = !!selectedAlias;
+    }
+    function configPicker(loading = false) {
+      const pick = menu([{ v: "", name: t("Enter manually") }, ...aliases.map((v) => ({ v, name: v }))], selectedAlias, t("SSH configuration"), (alias) => {
+        if (alias) {
+          if (!inputs.name.value || inputs.name.value === selectedAlias) inputs.name.value = alias;
+          inputs.target.value = alias; inputs.port.value = "";
+        }
+        selectedAlias = alias;
+        configFields();
+      });
+      pick.id = "ssh-host-config"; pick.setAttribute("aria-label", t("SSH configuration")); pick.disabled = loading || !aliases.length;
+      configSlot.replaceChildren(pick);
+    }
     const inputs = {};
     for (const [key, label, hint] of [["name", "Name", ""], ["target", "SSH destination", "user@host"], ["port", "SSH port", "22"], ["binary", "Remote Magpie binary", "/home/user/.local/bin/magpie"]]) {
       const labelEl = el("label", "", t(label)), input = el("input", "words");
@@ -57,6 +76,7 @@ magpie.plugin("ssh", (ctx) => {
       if (key === "port") { input.type = "number"; input.min = "1"; input.max = "65535"; }
       ed.append(labelEl, input); inputs[key] = input;
     }
+    const configNote = el("p", "sub"); ed.append(configNote);
     ed.append(el("p", "sub", t("Use a trusted SSH alias or user@host. OpenSSH handles keys, ssh-agent and jump hosts. Authenticate in a terminal first.")));
     const bar = el("div", "bar"), cancel = button(t("Cancel"), closeModal), save = button(t("Save"), async () => {
       save.disabled = cancel.disabled = true;
@@ -67,6 +87,19 @@ magpie.plugin("ssh", (ctx) => {
       finally { save.disabled = cancel.disabled = false; }
     }, "text primary");
     bar.append(cancel, save); ed.append(bar); openModal(ed); inputs.name.focus({ preventScroll: true });
+    configPicker(true);
+    api("ssh/config-hosts").then((out) => {
+      if (!editing(ed)) return;
+      aliases = out;
+      if (!Number(inputs.port.value) && inputs.target.value === existing.target && aliases.includes(existing.target)) {
+        selectedAlias = existing.target; configFields();
+      }
+      configPicker();
+      if (!aliases.length) configNote.textContent = t("No hosts found in ~/.ssh/config. Enter a destination manually.");
+    }).catch(() => {
+      if (!editing(ed)) return;
+      configPicker(); configNote.textContent = t("Could not read SSH configuration. Enter a destination manually.");
+    });
   }
   async function copyConfig(g) {
     const bound = connection, choices = await api("ssh/copy-choices");

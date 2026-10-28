@@ -8,6 +8,8 @@ body.web .ssh-nav { display: none !important; }
 .ssh-editor { grid-template-columns: minmax(0, 1fr); }
 .ssh-host-editor { grid-template-columns: 110px minmax(0, 1fr); }
 .ssh-host-editor .ebody > .sub { grid-column: 1 / -1; }
+.ssh-config-picker .proto { max-width: 100%; }
+.ssh-host-editor .ebody > .sub:empty { display: none; }
 .ssh-editor .ebody > .sub { margin: 0; line-height: 1.5; font-size: 12px; color: var(--muted); }
 .ssh-input { display: grid; gap: 6px; }
 .ssh-editor label { text-align: left; padding-top: 0; }

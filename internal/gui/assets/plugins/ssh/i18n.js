@@ -1,5 +1,8 @@
 magpie.strings({
   "zh": {
+    "Enter manually": "手动填写",
+    "No hosts found in ~/.ssh/config. Enter a destination manually.": "未在 ~/.ssh/config 中找到主机，请手动填写连接目标。",
+    "Could not read SSH configuration. Enter a destination manually.": "无法读取 SSH 配置，请手动填写连接目标。",
     "Host actions": "主机操作",
     "Model sources": "模型来源",
     "Use this computer’s models while SSH is connected": "SSH 连接期间使用本机模型",
@@ -36,6 +39,9 @@ magpie.strings({
     "Configuration copied": "配置已复制"
   },
   "zh-TW": {
+    "Enter manually": "手動填寫",
+    "No hosts found in ~/.ssh/config. Enter a destination manually.": "未在 ~/.ssh/config 中找到主機，請手動填寫連線目標。",
+    "Could not read SSH configuration. Enter a destination manually.": "無法讀取 SSH 設定，請手動填寫連線目標。",
     "Host actions": "主機操作",
     "Model sources": "模型來源",
     "Use this computer’s models while SSH is connected": "SSH 連線期間使用本機模型",
@@ -72,6 +78,9 @@ magpie.strings({
     "Configuration copied": "設定已複製"
   },
   "ja": {
+    "Enter manually": "手動で入力",
+    "No hosts found in ~/.ssh/config. Enter a destination manually.": "~/.ssh/config にホストがありません。接続先を手動で入力してください。",
+    "Could not read SSH configuration. Enter a destination manually.": "SSH 設定を読み込めません。接続先を手動で入力してください。",
     "Host actions": "ホストの操作",
     "Model sources": "モデルの接続先",
     "Use this computer’s models while SSH is connected": "SSH 接続中にこのコンピューターのモデルを使用",
@@ -108,6 +117,9 @@ magpie.strings({
     "Configuration copied": "設定をコピーしました"
   },
   "de": {
+    "Enter manually": "Manuell eingeben",
+    "No hosts found in ~/.ssh/config. Enter a destination manually.": "Keine Hosts in ~/.ssh/config gefunden. Ziel manuell eingeben.",
+    "Could not read SSH configuration. Enter a destination manually.": "SSH-Konfiguration konnte nicht gelesen werden. Ziel manuell eingeben.",
     "Host actions": "Host-Aktionen",
     "Model sources": "Modellquellen",
     "Use this computer’s models while SSH is connected": "Modelle dieses Computers während der SSH-Verbindung verwenden",

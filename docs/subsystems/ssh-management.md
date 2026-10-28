@@ -19,6 +19,19 @@ local agent code.
   stores no SSH credentials and is outside backup/sync. OpenSSH owns host
   trust, keys, ssh-agent, Include, Match and ProxyJump. Unknown/changed host
   keys and interactive authentication must be resolved in a terminal.
+- The host editor offers either a concrete alias from the local user's
+  `~/.ssh/config` or a manually entered destination and optional port.
+  [`ConfigHosts`](../../internal/sshremote/config.go) reads `Host` and `Include`
+  only; it never runs SSH, evaluates `Match exec`, or opens `IdentityFile`.
+  Aliases keep their original configuration rather than copying resolved
+  settings into Magpie; selecting one clears the port override. Includes use
+  OpenSSH's `~/.ssh` base, lexical glob order, double quotes, `~/` and
+  environment expansion. Conditions are not evaluated, so an alias may only
+  apply under its original conditions. Wildcard/negated patterns are omitted.
+  Token-dependent or other users' home includes, unreadable files, malformed
+  Host/Include lines and resource limits leave the list unavailable, with
+  manual entry still offered. No SSH configuration is written. Saving a host
+  does not connect to it.
 - [`ssh.go`](../../internal/sshremote/ssh.go) runs system `ssh` through `proc`:
   batch mode, strict host checking, no forwarded agent or X11, no shared
   master connection. Management clears configured forwards. Tunnel setup
