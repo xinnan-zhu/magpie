@@ -47,8 +47,16 @@ func Feed() string {
 	if f := os.Getenv("MAGPIE_UPDATE_FEED"); f != "" {
 		return f
 	}
+	if feedURL != "" {
+		return feedURL
+	}
 	return Site + "/api/latest"
 }
+
+// feedURL is the feed a build names for itself, a fork that publishes its
+// own releases: -ldflags "-X github.com/yetone/magpie/internal/update.feedURL=…".
+// Empty is magpie's own.
+var feedURL string
 
 // Release is one published version.
 type Release struct {

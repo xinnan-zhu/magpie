@@ -58,3 +58,23 @@ func TestHomebrew(t *testing.T) {
 		}
 	}
 }
+
+// A build that names its own feed (a fork's releases) reads it, and the
+// environment's still comes first.
+func TestFeedNamedAtBuild(t *testing.T) {
+	t.Setenv("MAGPIE_UPDATE_FEED", "")
+	old := feedURL
+	t.Cleanup(func() { feedURL = old })
+	feedURL = ""
+	if Feed() != Site+"/api/latest" {
+		t.Fatal(Feed())
+	}
+	feedURL = "https://example.test/latest.json"
+	if Feed() != feedURL {
+		t.Fatal(Feed())
+	}
+	t.Setenv("MAGPIE_UPDATE_FEED", "https://env.test/latest")
+	if Feed() != "https://env.test/latest" {
+		t.Fatal(Feed())
+	}
+}
