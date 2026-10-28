@@ -46,7 +46,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         }
         if(url.pathname === '/api/ssh/connections') {
           await held;
-          return json({id:'snapshot-a',host:hosts.find(h => h.id === req.postDataJSON().host),inspection:{installed:remoteMode !== 'missing',compatible:remoteMode !== 'missing',ready:remoteMode === 'ready',service:{Installed:remoteMode === 'ready',Running:remoteMode === 'ready'},context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
+          return json({id:'snapshot-a',host:hosts.find(h => h.id === req.postDataJSON().host),inspection:{installed:remoteMode !== 'missing',compatible:remoteMode !== 'missing',ready:remoteMode === 'ready',service:{Installed:remoteMode === 'ready',Running:remoteMode === 'ready'},proxy:remoteMode === 'stopped' ? {source:'shell',url:'http://127.0.0.1:7890'} : undefined,context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
         }
         if(url.pathname.endsWith('/deploy')) {
           remoteMode = failDeploy ? 'stopped' : 'ready';
@@ -190,20 +190,32 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       remoteMode = 'missing';
       await host('added').getByRole('button',{name:words('Connect'),exact:true}).click();
       await host('added').getByText(words('Magpie is not installed'),{exact:false}).waitFor();
+      // a missing Magpie can't look for a proxy before the click: the row says it will, switched on
+      const proxyRow = view.locator('.ssh-sub');
+      await proxyRow.getByText(words('Looked for when installing, in the SSH session, the systemd user environment and the login shell'),{exact:true}).waitFor();
+      assert.equal(await proxyRow.getByRole('switch').getAttribute('aria-checked'),'true');
       await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
       await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
       assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).length,1,'one click deploys and starts');
       assert.equal(posted.find(([p]) => p.endsWith('/deploy'))[1].start,true);
+      assert.equal(posted.find(([p]) => p.endsWith('/deploy'))[1].proxy,true,'the proxy found is used by default');
+      assert.equal(await view.locator('.ssh-sub').count(),0,'no proxy row once the service is installed');
       assert.equal(posted.filter(([p]) => p.endsWith('/service')).length,0,'no second install click');
       remoteMode = 'missing'; failDeploy = true;
       await host('added').getByRole('button',{name:words('Host actions'),exact:true}).click();
       await page.getByRole('menuitem',{name:words('Reconnect'),exact:true}).click();
+      await view.locator('.ssh-sub').getByRole('switch').click();
       await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
       await view.getByRole('button',{name:words('Install and start remote service'),exact:true}).waitFor();
       assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).length,2,'failed mutations are not retried');
+      assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).at(-1)[1].proxy,false,'switched off, the proxy is left out');
+      // found on the host, the proxy is named with where it came from; the choice is kept
+      await view.locator('.ssh-sub').getByText('http://127.0.0.1:7890 · ' + words('From the login shell'),{exact:true}).waitFor();
+      assert.equal(await view.locator('.ssh-sub').getByRole('switch').getAttribute('aria-checked'),'false');
       await view.getByRole('button',{name:words('Install and start remote service'),exact:true}).click();
       await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
       assert.equal(posted.filter(([p]) => p.endsWith('/service')).length,1,'service-only recovery after a partial install');
+      assert.deepEqual(posted.find(([p]) => p.endsWith('/service'))[1],{action:'install',proxy:false});
       assert.deepEqual(errors,[],`${lang} ${width}: configuration choices`);
       await context.close();
     }

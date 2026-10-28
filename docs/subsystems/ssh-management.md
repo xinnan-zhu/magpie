@@ -64,9 +64,14 @@ nothing remotely. Default lookup prefers `~/.local/lib/magpie/ssh/magpie`,
 then PATH; an explicit binary path takes precedence. An older binary is only
 asked for help, never run with an unknown management command.
 
-Deployment is explicit and supports Linux amd64/arm64. The GUI uses the existing
-update feed, mirror and checksum verifier (`update.DownloadCLI`). The CLI also
-accepts an offline binary plus its SHA-256. `Deploy` checks the ELF architecture
+Deployment is explicit and supports Linux amd64/arm64. The release is fetched
+on this computer, never by the remote host, through the existing update feed,
+mirror, local proxy and checksum (`update.FetchCLI`), and held in memory from
+download to upload: nothing is written to the local disk, so a download or
+upload cut short, even by the local process being killed, leaves nothing
+behind (`TestSSHOneClickInstallFromVerifiedFeed` lists the temporary folder
+during the upload). The CLI also accepts an offline binary plus its SHA-256,
+read into memory the same way. `Deploy` checks the ELF architecture
 and digest, uploads via stdin into a private temporary file, checks the digest
 again on the target, and atomically replaces the managed binary, retaining
 `magpie.previous`. Before replacement, the candidate's side-effect-free help
@@ -88,6 +93,26 @@ A lost mutation reply is never retried. The page reinspects after failure so
 an uploaded binary with a failed service can resume with a service-only action.
 The CLI's explicit offline upload and existing-installation deployment retain
 their upload-only behavior; service install/start are also offered separately.
+
+A user service doesn't see a proxy set where a terminal sets one: it starts
+from the service manager's environment plus what `daemon.Install` carries
+from the process installing it, which is the non-interactive SSH command's
+(`~/.bashrc` past its interactive guard, `~/.profile` and `~/.zshrc` are not
+read). While there is no service, `inspect` looks for a proxy
+([`DetectProxy`](../../internal/sshremote/proxy.go)) where the service would
+meet it, then in the user's shell: the SSH session's environment (carried),
+`systemctl --user show-environment` (inherited), then a login, interactive
+`$SHELL` with stdin closed, run as a probe whose whole process group ends
+when its five seconds or the inspection end. Only the `*_PROXY` variables of
+its `env` are read, after a marker so a startup banner isn't. The page shows
+the proxy without its user and password and where it was found; the values
+never leave the remote host. Installing a service gives it the proxy by
+default: a shell's is written into the service (`daemon.Options.Proxy`),
+a session's or the user manager's it already has. Switched off on the page
+(`proxy:false`, `magpie ssh service … install --no-proxy`), every proxy
+variable is set empty in the service, the user manager's included. A
+Magpie not yet installed can't look before the click, so the page says the
+proxy will be looked for at install. An existing service is never changed.
 Starting a service preserves its options, executable and environment.
 The shell and serving context can differ; agent management always uses the
 serving context. This version discovers Magpie's installed user daemon, not

@@ -20,13 +20,15 @@ const sshUsage = `magpie ssh — manage remote Magpie through system OpenSSH
   magpie ssh remove <id>
   magpie ssh inspect <id-or-alias>
   magpie ssh install <id-or-alias> <linux-binary> <sha256>
-  magpie ssh service <id-or-alias> install|start
+  magpie ssh service <id-or-alias> install [--no-proxy] | start
   magpie ssh web <id-or-alias>     print a one-use login link; keep this command running
 
 Authenticate and verify host keys with system SSH in a terminal first.
 install uploads a verified nogui binary; it does not start or initialize Magpie.
 service install explicitly installs and starts the full user service with a
-loopback Web page. Existing services are preserved. No sudo or LAN changes.
+loopback Web page, given the remote host's proxy (from the SSH session, the
+systemd user environment or a login shell) unless --no-proxy. Existing
+services are preserved. No sudo or LAN changes.
 `
 
 func sshCmd(args []string) error {
@@ -90,9 +92,14 @@ func sshCmd(args []string) error {
 		if err = sshremote.Call(ctx, h, sshremote.Request{Method: "inspect"}, &s); err != nil {
 			return err
 		}
-		return sshremote.Deploy(ctx, h, s, args[2], args[3])
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			return err
+		}
+		return sshremote.Deploy(ctx, h, s, data, args[3])
 	case "service":
-		if len(args) != 3 || args[2] != "install" && args[2] != "start" {
+		noProxy := len(args) == 4 && args[2] == "install" && args[3] == "--no-proxy"
+		if len(args) != 3 && !noProxy || args[2] != "install" && args[2] != "start" {
 			return errors.New(sshUsage)
 		}
 		var s sshremote.Inspection
@@ -103,7 +110,11 @@ func sshCmd(args []string) error {
 		if s.Shell != nil {
 			target = s.Shell.Target
 		}
-		if err = sshremote.Call(ctx, h, sshremote.Request{Method: "service-" + args[2], Target: target}, &s); err != nil {
+		req := sshremote.Request{Method: "service-" + args[2], Target: target}
+		if args[2] == "install" {
+			req = sshremote.ServiceInstallRequest(target, !noProxy)
+		}
+		if err = sshremote.Call(ctx, h, req, &s); err != nil {
 			return err
 		}
 		return emit(s)

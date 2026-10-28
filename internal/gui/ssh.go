@@ -139,6 +139,8 @@ func sshRoutes(mux *http.ServeMux, w Windows) {
 		var in struct {
 			Action   string `json:"action"`
 			Revision string `json:"revision,omitempty"`
+			// Proxy false installs the service without the remote host's proxy
+			Proxy *bool `json:"proxy,omitempty"`
 		}
 		if !decode(rw, r, &in) {
 			return
@@ -157,7 +159,11 @@ func sshRoutes(mux *http.ServeMux, w Windows) {
 		if c.Inspection.Shell != nil {
 			target = c.Inspection.Shell.Target
 		}
-		if err = c.Call(r.Context(), sshremote.Request{Method: "service-" + in.Action, Target: target}, &out); err != nil {
+		req := sshremote.Request{Method: "service-" + in.Action, Target: target}
+		if in.Action == "install" {
+			req = sshremote.ServiceInstallRequest(target, in.Proxy == nil || *in.Proxy)
+		}
+		if err = c.Call(r.Context(), req, &out); err != nil {
 			fail(rw, err)
 			return
 		}

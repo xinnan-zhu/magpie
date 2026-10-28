@@ -1061,31 +1061,67 @@ func StartBeside(exe string, window bool, view string) error {
 	return err
 }
 
-// DownloadCLI fetches a terminal-only release for a remote host using the same
-// feed, mirror, proxy and checksum verification as local updates. The caller
-// owns the returned private directory and must call cleanup.
-func DownloadCLI(ctx context.Context, osName, arch string) (path, digest string, cleanup func(), err error) {
+// maxCLI bounds a terminal-only release held in memory (FetchCLI); one is
+// tens of megabytes.
+const maxCLI = 512 << 20
+
+// FetchCLI fetches a terminal-only release for a remote host into memory,
+// through the same feed, mirror and proxy as local updates, and checks it
+// against the feed's checksum. Nothing is written to this computer's disk,
+// so a download or upload cut short, even by this process being killed,
+// leaves nothing behind.
+func FetchCLI(ctx context.Context, osName, arch string) (data []byte, digest string, err error) {
 	if osName != "linux" || (arch != "amd64" && arch != "arm64") {
-		return "", "", nil, errors.New("unsupported SSH deployment target")
+		return nil, "", errors.New("unsupported SSH deployment target")
 	}
 	release, err := Latest(ctx)
 	if err != nil {
-		return "", "", nil, err
+		return nil, "", err
 	}
 	name := "magpie-cli-" + osName + "-" + arch
 	a, ok := release.Assets[name]
 	if !ok || len(a.SHA256) != 64 {
-		return "", "", nil, errors.New("the release has no verified binary for this host")
+		return nil, "", errors.New("the release has no verified binary for this host")
 	}
-	dir, err := os.MkdirTemp("", "magpie-ssh-release-")
+	u := mirrored(mirrorOf(ctx), a.URL)
+	mirror := strings.TrimSuffix(u, a.URL)
+	fail := func(err error) ([]byte, string, error) {
+		if u != a.URL && !errors.As(err, new(*MirrorError)) {
+			err = &MirrorError{Mirror: mirror, Err: err}
+		}
+		return nil, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
-		return "", "", nil, err
+		return nil, "", err
 	}
-	cleanup = func() { os.RemoveAll(dir) }
-	path = filepath.Join(dir, name)
-	if err = fetch(ctx, a, path); err != nil {
-		cleanup()
-		return "", "", nil, err
+	res, err := source.Do(client, req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return fail(err)
+		}
+		return fail(&NetError{File: name, Err: err})
 	}
-	return path, a.SHA256, cleanup, nil
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fail(fmt.Errorf("download %s: %s", name, res.Status))
+	}
+	data, err = io.ReadAll(io.LimitReader(res.Body, maxCLI+1))
+	if err != nil {
+		if ctx.Err() == nil {
+			err = &NetError{File: name, Err: err}
+		}
+		return fail(err)
+	}
+	if len(data) > maxCLI {
+		return fail(fmt.Errorf("%s is larger than a release can be", name))
+	}
+	sum := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), a.SHA256) {
+		if u != a.URL {
+			return fail(fmt.Errorf("%s from the mirror %s does not match its checksum from %s; not installed", name, mirror, Site))
+		}
+		return nil, "", fmt.Errorf("%s does not match its checksum", name)
+	}
+	return data, a.SHA256, nil
 }

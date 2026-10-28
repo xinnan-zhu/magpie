@@ -196,28 +196,24 @@ func TestDeployChecksDigestAndArchitectureBeforeSSH(t *testing.T) {
 	binary.LittleEndian.PutUint16(data[18:], 62)
 	binary.LittleEndian.PutUint32(data[20:], 1)
 	binary.LittleEndian.PutUint16(data[52:], 64)
-	path := filepath.Join(home, "artifact")
-	if e := os.WriteFile(path, data, 0600); e != nil {
-		t.Fatal(e)
-	}
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 	h := Host{Name: "fixture", Target: "fixture"}
 	s := Inspection{Context: Context{OS: "linux", Arch: "amd64"}}
-	if e := Deploy(context.Background(), h, s, path, strings.Repeat("0", 64)); e == nil {
+	if e := Deploy(context.Background(), h, s, data, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("checksum mismatch accepted")
 	}
 	if _, e := os.Stat(record); !os.IsNotExist(e) {
 		t.Fatal("upload ran before validation", e)
 	}
-	if e := Deploy(context.Background(), h, s, path, digest); e != nil {
+	if e := Deploy(context.Background(), h, s, data, digest); e != nil {
 		t.Fatal(e)
 	}
 	uploaded, e := os.ReadFile(record)
 	if e != nil || string(uploaded) != string(data) {
 		t.Fatal("wrong upload", e)
 	}
-	if e := Deploy(context.Background(), h, Inspection{Context: Context{OS: "linux", Arch: "arm64"}}, path, digest); e == nil {
+	if e := Deploy(context.Background(), h, Inspection{Context: Context{OS: "linux", Arch: "arm64"}}, data, digest); e == nil {
 		t.Fatal("wrong architecture accepted")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -363,6 +364,26 @@ func TestPick(t *testing.T) {
 	} {
 		if _, err := pick(p, p); err == nil {
 			t.Errorf("%s was taken", p)
+		}
+	}
+}
+
+// A proxy given at install takes the place of the one in the environment it
+// is installed from, and the others are set empty so the service manager's
+// own environment can't put one back; none given keeps the environment's.
+func TestWithProxy(t *testing.T) {
+	env := []string{"PATH=/bin", "HTTPS_PROXY=http://session:1", "no_proxy=localhost"}
+	if got := withProxy(env, Options{}); !slices.Equal(got, env) {
+		t.Errorf("no proxy given changed the environment: %v", got)
+	}
+	got := withProxy(env, Options{Proxy: map[string]string{"https_proxy": "http://shell:2"}})
+	want := []string{"PATH=/bin", "HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "NO_PROXY=", "http_proxy=", "https_proxy=http://shell:2", "all_proxy=", "no_proxy="}
+	if !slices.Equal(got, want) {
+		t.Errorf("a given proxy:\n got %v\nwant %v", got, want)
+	}
+	for _, kv := range withProxy(env, Options{Proxy: map[string]string{}}) {
+		if k, v, _ := strings.Cut(kv, "="); slices.Contains(ProxyVars, k) && v != "" {
+			t.Errorf("no proxy kept %s", kv)
 		}
 	}
 }

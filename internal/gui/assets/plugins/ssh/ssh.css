@@ -59,3 +59,9 @@ body.web .ssh-nav { display: none !important; }
   .ssh-facts .row { flex-wrap: wrap; gap: 2px 14px; padding-top: 7px; padding-bottom: 7px; }
   .ssh-fact { flex-basis: 100%; }
 }
+/* the proxy a service installed now is given, under its host's row */
+.ssh-hosts .row.ssh-sub { min-height: 40px; gap: 10px; padding: 2px 13px 10px 48px; }
+.ssh-hosts .row.ssh-sub .name { font-size: 12.5px; }
+.ssh-hosts .row.ssh-sub .sub { white-space: normal; overflow-wrap: anywhere; }
+.ssh-sub + .ssh-note { margin-top: -4px; }
+.ssh-hosts .row.ssh-host + .row.ssh-sub { border-top: 0; }

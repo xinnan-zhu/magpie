@@ -90,6 +90,15 @@ type Inspection struct {
 	WebPort    int           `json:"webPort,omitempty"`
 	Ready      bool          `json:"ready"`
 	Problem    string        `json:"problem,omitempty"`
+	// Proxy is what a service installed now would use; looked for only
+	// while there is no service to install it into.
+	Proxy *Proxy `json:"proxy,omitempty"`
+}
+
+// ServiceInstall is service-install's Body. Proxy false installs the service
+// with no proxy; left out, it is given the one found (DetectProxy).
+type ServiceInstall struct {
+	Proxy *bool `json:"proxy,omitempty"`
 }
 
 type Request struct {
@@ -143,7 +152,14 @@ func ServeControl(ctx context.Context, in io.Reader, out io.Writer, version stri
 			err = errors.New("an existing service is installed; manage it from its remote Web page or CLI")
 			break
 		}
-		err = daemon.Install(daemon.Options{Web: "127.0.0.1:3430", Key: newID()})
+		var o ServiceInstall
+		if req.Body != nil {
+			if e := json.Unmarshal(req.Body, &o); e != nil {
+				err = e
+				break
+			}
+		}
+		err = daemon.Install(daemon.Options{Web: "127.0.0.1:3430", Key: newID(), Proxy: DetectProxy(ctx).Use(o.Proxy == nil || *o.Proxy)})
 		if err == nil {
 			result, err = Inspect(ctx, version)
 		}
@@ -212,6 +228,9 @@ func Inspect(ctx context.Context, version string) (Inspection, error) {
 	if err != nil {
 		s.Problem = err.Error()
 		return s, nil
+	}
+	if !s.Service.Installed {
+		s.Proxy = DetectProxy(ctx)
 	}
 	addr, key := daemon.Web()
 	if addr == "" || key == "" {

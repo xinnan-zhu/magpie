@@ -1,24 +1,25 @@
 package sshremote
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/proc"
 )
 
-// Deploy uploads a verified Linux nogui binary, without initializing it or
-// replacing a PATH installation. The previous uploaded binary is retained.
-// The digest comes from the official update feed or an explicit offline choice.
-func Deploy(ctx context.Context, h Host, s Inspection, path, digest string) error {
+// Deploy uploads a verified Linux nogui binary, held in memory, without
+// initializing it or replacing a PATH installation. The previous uploaded
+// binary is retained. The digest comes from the official update feed or an
+// explicit offline choice.
+func Deploy(ctx context.Context, h Host, s Inspection, data []byte, digest string) error {
 	if h.Binary != "" {
 		return errors.New("clear the explicit binary path before deploying a managed installation")
 	}
@@ -44,34 +45,23 @@ func Deploy(ctx context.Context, h Host, s Inspection, path, digest string) erro
 	default:
 		return errors.New("unsupported remote architecture")
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	e, err := elf.NewFile(f)
+	e, err := elf.NewFile(bytes.NewReader(data))
 	if err != nil {
 		return errors.New("choose a Linux Magpie nogui binary")
 	}
 	if e.Machine != want {
 		return errors.New("the binary architecture does not match this remote host")
 	}
-	sum := sha256.New()
-	if _, err = io.Copy(sum, f); err != nil {
-		return err
-	}
-	if !strings.EqualFold(hex.EncodeToString(sum.Sum(nil)), digest) {
+	sum := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), digest) {
 		return errors.New("the binary SHA-256 does not match")
-	}
-	if _, err = f.Seek(0, 0); err != nil {
-		return err
 	}
 	args := append(BaseArgs(h, false), "--", h.Target, uploadScript(digest, s.Installed))
 	cmd := proc.CommandContext(ctx, "ssh", args...)
-	cmd.Stdin = f
+	cmd.Stdin = bytes.NewReader(data)
 	stderr := &boundedBuffer{limit: 8192}
 	cmd.Stderr = stderr
-	if err = cmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil {
 		return sshError(stderr.String(), err)
 	}
 	return nil
@@ -87,8 +77,9 @@ func uploadScript(digest string, replace bool) string {
 
 // InstallService follows an explicit deployment with the original daemon
 // installer. It rechecks the actual context and never replaces a service.
-// Startup polling is read-only; a lost install reply is never retried.
-func InstallService(ctx context.Context, h Host) (Inspection, error) {
+// Startup polling is read-only; a lost install reply is never retried. The
+// service is given the proxy found on the remote host unless proxy is false.
+func InstallService(ctx context.Context, h Host, proxy bool) (Inspection, error) {
 	var s Inspection
 	if err := Call(ctx, h, Request{Method: "inspect"}, &s); err != nil {
 		return s, err
@@ -99,7 +90,7 @@ func InstallService(ctx context.Context, h Host) (Inspection, error) {
 	if s.Service.Installed {
 		return s, errors.New("an existing service was found; reconnect to manage it without replacing its settings")
 	}
-	if err := Call(ctx, h, Request{Method: "service-install", Target: s.Context.Target}, &s); err != nil {
+	if err := Call(ctx, h, ServiceInstallRequest(s.Context.Target, proxy), &s); err != nil {
 		return s, fmt.Errorf("service installation result unconfirmed; reconnect before another action: %w", err)
 	}
 	wait, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -115,6 +106,16 @@ func InstallService(ctx context.Context, h Host) (Inspection, error) {
 		}
 	}
 	return s, nil
+}
+
+// ServiceInstallRequest installs the service in the context target, with the
+// remote host's proxy or, proxy false, none.
+func ServiceInstallRequest(target string, proxy bool) Request {
+	req := Request{Method: "service-install", Target: target}
+	if !proxy {
+		req.Body, _ = json.Marshal(ServiceInstall{Proxy: &proxy})
+	}
+	return req
 }
 
 func ArtifactName(s Inspection) (string, error) {

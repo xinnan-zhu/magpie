@@ -135,7 +135,7 @@ func TestSSHInstallServiceChecksContextWaitsAndNeverRetries(t *testing.T) {
 			}
 			bounded, stop := context.WithTimeout(ctx, 15*time.Second)
 			defer stop()
-			s, err := InstallService(bounded, Host{Name: "fixture", Target: "fixture"})
+			s, err := InstallService(bounded, Host{Name: "fixture", Target: "fixture"}, true)
 			if scenario == "ready" {
 				if err != nil || !s.Ready {
 					t.Fatal("did not wait for the authenticated Web service", s, err)

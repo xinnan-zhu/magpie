@@ -88,6 +88,8 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 	mux.HandleFunc("POST /api/ssh/connections/{id}/deploy", desktop(func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Start bool `json:"start"`
+			// Proxy false installs the service without the remote host's proxy
+			Proxy *bool `json:"proxy,omitempty"`
 		}
 		if !sshDecode(w, r, &in) {
 			return
@@ -108,18 +110,18 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 		}
 		ctx, cancel := c.OperationContext(r.Context(), 5*time.Minute)
 		defer cancel()
-		path, digest, cleanup, e := update.DownloadCLI(ctx, "linux", name[len("magpie-cli-linux-"):])
+		// held in memory from download to upload: nothing is left on this computer
+		data, digest, e := update.FetchCLI(ctx, "linux", name[len("magpie-cli-linux-"):])
 		if e != nil {
 			fail(w, e)
 			return
 		}
-		defer cleanup()
-		if e = sshremote.Deploy(ctx, c.Host, c.Inspection, path, digest); e != nil {
+		if e = sshremote.Deploy(ctx, c.Host, c.Inspection, data, digest); e != nil {
 			fail(w, e)
 			return
 		}
 		if in.Start {
-			if _, e = sshremote.InstallService(ctx, c.Host); e != nil {
+			if _, e = sshremote.InstallService(ctx, c.Host, in.Proxy == nil || *in.Proxy); e != nil {
 				fail(w, e)
 				return
 			}

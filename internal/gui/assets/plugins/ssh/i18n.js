@@ -1,5 +1,10 @@
 magpie.strings({
   "zh": {
+    "Remote proxy": "远端代理",
+    "From the SSH session": "来自 SSH 会话",
+    "From the systemd user environment": "来自 systemd 用户环境",
+    "From the login shell": "来自登录 shell",
+    "Looked for when installing, in the SSH session, the systemd user environment and the login shell": "安装时从 SSH 会话、systemd 用户环境和登录 shell 中检测",
     "＋ Add SSH host": "＋ 添加 SSH 主机",
     "Leave empty to use the managed install, then the remote PATH": "留空则先用 Magpie 管理的安装，再从远端 PATH 查找",
     "Magpie is not installed": "未安装 Magpie",
@@ -47,6 +52,11 @@ magpie.strings({
     "Configuration copied": "配置已复制"
   },
   "zh-TW": {
+    "Remote proxy": "遠端代理",
+    "From the SSH session": "來自 SSH 工作階段",
+    "From the systemd user environment": "來自 systemd 使用者環境",
+    "From the login shell": "來自登入 shell",
+    "Looked for when installing, in the SSH session, the systemd user environment and the login shell": "安裝時從 SSH 工作階段、systemd 使用者環境和登入 shell 中偵測",
     "＋ Add SSH host": "＋ 新增 SSH 主機",
     "Leave empty to use the managed install, then the remote PATH": "留空則先用 Magpie 管理的安裝，再從遠端 PATH 尋找",
     "Magpie is not installed": "未安裝 Magpie",
@@ -94,6 +104,11 @@ magpie.strings({
     "Configuration copied": "設定已複製"
   },
   "ja": {
+    "Remote proxy": "リモートのプロキシ",
+    "From the SSH session": "SSH セッションから",
+    "From the systemd user environment": "systemd のユーザー環境から",
+    "From the login shell": "ログインシェルから",
+    "Looked for when installing, in the SSH session, the systemd user environment and the login shell": "インストール時に SSH セッション、systemd のユーザー環境、ログインシェルから検出します",
     "＋ Add SSH host": "＋ SSH ホストを追加",
     "Leave empty to use the managed install, then the remote PATH": "空欄なら Magpie が管理するインストール、次にリモートの PATH を使います",
     "Magpie is not installed": "Magpie がインストールされていません",
@@ -141,6 +156,11 @@ magpie.strings({
     "Configuration copied": "設定をコピーしました"
   },
   "de": {
+    "Remote proxy": "Entfernter Proxy",
+    "From the SSH session": "Aus der SSH-Sitzung",
+    "From the systemd user environment": "Aus der systemd-Benutzerumgebung",
+    "From the login shell": "Aus der Login-Shell",
+    "Looked for when installing, in the SSH session, the systemd user environment and the login shell": "Wird bei der Installation in der SSH-Sitzung, der systemd-Benutzerumgebung und der Login-Shell gesucht",
     "＋ Add SSH host": "＋ SSH-Host hinzufügen",
     "Leave empty to use the managed install, then the remote PATH": "Leer lassen, um die verwaltete Installation und dann den PATH des Hosts zu nutzen",
     "Magpie is not installed": "Magpie ist nicht installiert",

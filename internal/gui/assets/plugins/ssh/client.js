@@ -8,8 +8,11 @@ magpie.plugin("ssh", (ctx) => {
   const { el, button, menu, toggle } = ctx.ui;
   const HOST = "M2.5 3h11a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM5.5 14h5M8 11.5V14M4.5 5.5 6 7 4.5 8.5M8 8.5h2.5";
   const TRASH = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v4M9 7v4";
-  // agents is null until the connected host's are read
-  let page, hosts = [], selected = "", connecting = "", connection = null, generation = 0, busy = false, installing = false, agents = null, tunnel = null, tunnelPort = 3431;
+  // where a remote proxy was found (sshremote.Proxy's source)
+  const PROXY_FROM = { session: "From the SSH session", systemd: "From the systemd user environment", shell: "From the login shell" };
+  // agents is null until the connected host's are read; useProxy is whether
+  // a service installed now is given the proxy found on the host
+  let useProxy = true, page, hosts = [], selected = "", connecting = "", connection = null, generation = 0, busy = false, installing = false, agents = null, tunnel = null, tunnelPort = 3431;
   const endpoint = (part, c = connection) => "ssh/connections/" + encodeURIComponent(c.id) + "/" + part;
   const editing = (ed) => ed.isConnected && !document.getElementById("modal").hidden && !document.getElementById("modal").classList.contains("out");
   function editor(title, cls = "") {
@@ -40,7 +43,7 @@ magpie.plugin("ssh", (ctx) => {
     b.disabled = busy; return b;
   }
   async function forget() {
-    generation++; busy = false; installing = false; connecting = ""; agents = null; tunnel = null;
+    generation++; busy = false; installing = false; connecting = ""; agents = null; tunnel = null; useProxy = true;
     const old = connection; connection = null;
     if (old) await fetch("/api/ssh/connections/" + encodeURIComponent(old.id), { method: "DELETE" });
   }
@@ -77,7 +80,7 @@ magpie.plugin("ssh", (ctx) => {
   async function deploy(g, start) {
     const bound = connection;
     installing = start; draw();
-    try { await api(endpoint("deploy", bound), { start }); }
+    try { await api(endpoint("deploy", bound), start ? { start, proxy: useProxy } : { start }); }
     catch (e) {
       if (g === generation && bound === connection) await connect(g).catch(() => {});
       throw e;
@@ -203,7 +206,7 @@ magpie.plugin("ssh", (ctx) => {
   function environment() {
     const s = connection.inspection, c = s.context, ed = editor(t("Remote environment"));
     const facts = el("div", "list ssh-facts");
-    for (const [label, value] of [["Remote environment", [c.hostname, c.user, c.os, c.arch, c.version].filter(Boolean).join(" · ")], ["Configuration directory", c.config], ["Remote Magpie binary", c.binary], ["Remote service", s.service.Running ? t("Running") : t("Stopped")], ["Gateway", c.gateway], ["SSH shell configuration", s.shell && s.shell.target !== c.target ? s.shell.config : ""]]) {
+    for (const [label, value] of [["Remote environment", [c.hostname, c.user, c.os, c.arch, c.version].filter(Boolean).join(" · ")], ["Configuration directory", c.config], ["Remote Magpie binary", c.binary], ["Remote service", s.service.Running ? t("Running") : t("Stopped")], ["Gateway", c.gateway], ["Remote proxy", s.proxy ? [s.proxy.url, t(PROXY_FROM[s.proxy.source] || "")].filter(Boolean).join(" · ") : ""], ["SSH shell configuration", s.shell && s.shell.target !== c.target ? s.shell.config : ""]]) {
       if (!value) continue;
       const row = el("div", "row"); row.append(el("span", "ssh-fact", t(label)), el("code", "", value)); facts.append(row);
     }
@@ -247,7 +250,20 @@ magpie.plugin("ssh", (ctx) => {
     // a service that runs and still isn't ready says why under the row; trying again is all the page can do
     if (s.service.Installed && s.service.Running) return [t("Remote Magpie is not ready"), action("Reconnect", connect)];
     const verb = s.service.Installed ? "start" : "install";
-    return [t("Remote service is not running"), action(verb === "start" ? "Start remote service" : "Install and start remote service", async (g) => { await api(endpoint("service"), { action: verb }); await connect(g); }, "text primary")];
+    return [t("Remote service is not running"), action(verb === "start" ? "Start remote service" : "Install and start remote service", async (g) => { await api(endpoint("service"), verb === "install" ? { action: verb, proxy: useProxy } : { action: verb }); await connect(g); }, "text primary")];
+  }
+  // the proxy a service installed now is given, with the switch that leaves it
+  // out; shown only while the next click installs one
+  function proxyRow(list, s) {
+    // a Magpie not yet installed can't look before the click: the row says when it will
+    const installs = !s.installed || s.compatible && !s.service.Installed;
+    if (!installs || s.installed && !s.proxy) return;
+    const p = s.proxy, from = p ? [p.url, t(PROXY_FROM[p.source] || "")].filter(Boolean).join(" · ")
+      : t("Looked for when installing, in the SSH session, the systemd user environment and the login shell");
+    const row = el("div", "row ssh-sub"), who = el("div", "who");
+    who.append(el("div", "name", t("Remote proxy")), el("div", "sub", from));
+    row.append(who, toggle(useProxy, t("Remote proxy"), (on) => { useProxy = on; }));
+    list.append(row);
   }
   function hostRow(list, h) {
     const on = connection?.host.id === h.id, s = on ? connection.inspection : null;
@@ -283,6 +299,7 @@ magpie.plugin("ssh", (ctx) => {
     row.oncontextmenu = (e) => { e.preventDefault(); menuFor(); };
     val.append(more); row.append(glyph, who, val); list.append(row);
     if (!s) return;
+    if (!s.ready) proxyRow(list, s);
     if (s.problem) list.append(el("p", "ssh-note", s.problem));
     for (const advice of s.service.Advice || []) list.append(el("p", "ssh-note", advice));
   }

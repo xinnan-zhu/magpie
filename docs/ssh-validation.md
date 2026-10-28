@@ -177,6 +177,36 @@ the primary action at the right.
   screenshots of the fixtures, light and dark; no real host was connected.
   `i18n.test.cjs`, named in the commands above, does not exist in the tree.
 
+### Local-only download and remote proxy follow-up (2026-10-28)
+
+The release is held in memory from download to upload (`update.FetchCLI`
+replaces `DownloadCLI`), and a service installed over SSH is given the
+remote host's proxy by default, found in the SSH session, the systemd user
+environment or a login shell, with a switch on the page and `--no-proxy` in
+the CLI to leave it out.
+
+- Passed `-race -count=3` of `internal/sshremote`, `internal/daemon` and
+  `internal/gui -run 'TestSSH|TestForwardedWeb|TestManager'`;
+  `TestProxy*` also passed `-race -count=10`. `internal/update` and
+  `internal/cli` passed without `-race`.
+- Under `-race`, `internal/update`'s
+  `TestDownloadDroppedConnectionErrorKeepsAddressOut` and `internal/cli`'s
+  `TestAccountsImport` and `TestGoneAgentDefault` report data races at
+  `ad383351` too, before any SSH change; `TestPluginOffAndRemovePutTheAgentBack`
+  raced at `9eb34878` but not in one run at `ad383351`. None is fixed here.
+- Broken by hand, each check went red: a temporary file written during the
+  upload (`the release was written to this computer's disk`), the shell left
+  out of detection, the shell's proxy not given to the service, and the shell
+  run without its own process group (`what the shell started outlived the
+  inspection`).
+- Passed `ssh.test.cjs`, `i18n-keys`, `gui-zh-tw`, `gui-ja`, `gui-de`,
+  `builtins` and `user-select` in both engines; the page test checks the
+  proxy row's default, switching it off for both the one-click install and a
+  service-only install, and that it goes once a service exists.
+- Passed Linux, Windows and macOS amd64 `go vet` of the touched packages and
+  Linux amd64/arm64 nogui builds. No real host, shell or proxy was used: the
+  shell, `systemctl` and SSH are fixtures.
+
 ## Failure checks and independent fixes
 
 - Reversing the exact-key guard with a temporary Go overlay makes

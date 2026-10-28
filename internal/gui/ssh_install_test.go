@@ -37,6 +37,7 @@ set -eu
 body="$HOME/request"
 cat > "$body"
 if [ "$(head -c 4 "$body")" = "$(printf '\177ELF')" ]; then
+  ls -A "$TMPDIR" > "$HOME/local-temp-during-upload"
   cp "$body" "$HOME/uploaded"
   exit 0
 fi
@@ -55,6 +56,13 @@ fi
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+"/usr/bin:/bin")
+			// the release is held in memory from download to upload: this
+			// computer's temporary folder stays empty while it goes over
+			temp := filepath.Join(home, "local-temp")
+			if err := os.MkdirAll(temp, 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", temp)
 			artifact := make([]byte, 64)
 			copy(artifact, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
 			binary.LittleEndian.PutUint16(artifact[16:], 2)
@@ -102,6 +110,13 @@ fi
 			}
 			if rec.Code != http.StatusOK || readErr != nil || string(installed) != "install\n" {
 				t.Fatal("one-click setup", rec.Code, rec.Body.String(), string(installed), readErr)
+			}
+			during, err := os.ReadFile(filepath.Join(home, "local-temp-during-upload"))
+			if err != nil || len(during) != 0 {
+				t.Fatal("the release was written to this computer's disk during the upload", string(during), err)
+			}
+			if left, err := os.ReadDir(temp); err != nil || len(left) != 0 {
+				t.Fatal("the release left files on this computer", left, err)
 			}
 			var status sshremote.Inspection
 			if err := sshremote.Call(context.Background(), c.Host, sshremote.Request{Method: "inspect"}, &status); err != nil || !status.Ready {

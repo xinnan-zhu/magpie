@@ -81,6 +81,12 @@ type Options struct {
 	// Key is the page's MAGPIE_WEB_KEY, written into the service so its
 	// link stays the same across restarts; needed with Web.
 	Key string
+	// Proxy, when not nil, is the service's proxy in place of the one in
+	// the environment it is installed from: each of ProxyVars it names
+	// with its value, and every other one set empty, so the service
+	// manager's own environment (systemd's user environment) doesn't
+	// reach the service either. Empty is no proxy at all.
+	Proxy map[string]string
 }
 
 // Install writes the service for this copy of magpie, with the
@@ -104,7 +110,7 @@ func Install(o Options) error {
 		return err
 	}
 	widenPath()
-	if err := m.install(exe, serveArgs(o), withKey(environ(), o)); err != nil {
+	if err := m.install(exe, serveArgs(o), withKey(withProxy(environ(), o), o)); err != nil {
 		return err
 	}
 	os.Remove(removedMark())
@@ -138,6 +144,23 @@ const webKeyVar = "MAGPIE_WEB_KEY"
 
 // withKey is env with the page's key, when it has a page: a key in the
 // shell's environment is never carried otherwise.
+// withProxy is env with o.Proxy in place of its proxy variables.
+func withProxy(env []string, o Options) []string {
+	if o.Proxy == nil {
+		return env
+	}
+	out := make([]string, 0, len(env)+len(ProxyVars))
+	for _, kv := range env {
+		if !slices.Contains(ProxyVars, kv[:strings.IndexByte(kv, '=')]) {
+			out = append(out, kv)
+		}
+	}
+	for _, k := range ProxyVars {
+		out = append(out, k+"="+o.Proxy[k])
+	}
+	return out
+}
+
 func withKey(env []string, o Options) []string {
 	if o.Web == "" {
 		return env
@@ -361,14 +384,17 @@ func sameFile(a, b string) bool {
 // installed from: the PATH that finds the agents' CLIs and bun, the proxy,
 // magpie's own settings, and where each agent keeps its files. A service
 // starts with the system's bare environment otherwise.
-var carried = []string{
-	"PATH",
-	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+var carried = append(append([]string{"PATH"}, ProxyVars...),
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
 	"MAGPIE_ADDR", "MAGPIE_TRUST_PROXY", "MAGPIE_BUN", "MAGPIE_WEB_URL",
 	// `magpie daemon install --tls-cert … --tls-key …` sets them
 	"MAGPIE_TLS_CERT", "MAGPIE_TLS_KEY",
+)
+
+// ProxyVars are the variables a proxy is given in, which a service carries.
+var ProxyVars = []string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
 }
 
 // environ is carried's variables that are set, as KEY=value, in order.
