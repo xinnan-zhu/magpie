@@ -2,13 +2,11 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -134,6 +132,22 @@ func TestHeldThinkingKeepsTheAgentAlive(t *testing.T) {
 	}
 }
 
+// sawWriter is a recorder that closes saw once a write holds word.
+type sawWriter struct {
+	*httptest.ResponseRecorder
+	word string
+	once sync.Once
+	saw  chan struct{}
+}
+
+func (w *sawWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(b)
+	if bytes.Contains(b, []byte(w.word)) {
+		w.once.Do(func() { close(w.saw) })
+	}
+	return n, err
+}
+
 // A stream's last event written after the agent went away reached nobody:
 // the reply isn't whole, and the request is recorded as canceled (499), not
 // as a 200 done (#751, a Claude Code run stopped by Alma's timeout).
@@ -152,22 +166,22 @@ func TestClientGoneRecordedAsCanceled(t *testing.T) {
 	// Claude Code's run stopped mid-reply, written to the holdWriter the
 	// gateway gives it: relay still ends the stream it was encoding
 	// (message_stop), which isn't the reply made whole
-	dir := fakeClaudeCalling(t)
+	fakeClaudeCalling(t)
 	s := New()
 	t.Cleanup(s.subscription.abortAll)
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
+	// the agent leaves once the reply is under way, whenever that is: a
+	// fixed wait for Claude Code to start ran out on a loaded machine, and
+	// the agent left before there was any reply
+	rec := &sawWriter{ResponseRecorder: httptest.NewRecorder(), word: "thinking it over", saw: make(chan struct{})}
 	go func() {
-		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-			b, _ := os.ReadFile(filepath.Join(dir, "hang.pid"))
-			if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid != 0 {
-				time.Sleep(200 * time.Millisecond) // its reply under way
-				break
-			}
+		select {
+		case <-rec.saw:
+		case <-time.After(time.Minute):
 		}
 		cancel()
 	}()
-	rec := httptest.NewRecorder()
 	h = newHoldWriter(rec, false)
 	h.ctx = ctx
 	p := provider.Provider{ID: "claude", Account: &provider.Account{Agent: "claude", User: "u"}}

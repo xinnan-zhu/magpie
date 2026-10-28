@@ -25,6 +25,12 @@ func unroutedLimits(t *testing.T, show, most time.Duration) {
 	t.Cleanup(func() { unroutedShow, unroutedMost = s, m })
 }
 
+// ownWorkRoom is unroutedUnknown for a test of a known wait: the room left
+// for magpie's own work around it (parsing, the handler's start). 100ms of
+// it ran out on a loaded machine before the body's first read, and a slow
+// body was answered 504 as if held in no known wait.
+const ownWorkRoom = time.Second
+
 // unknownLimit sets how long a request may be held before routing in no
 // wait magpie knows of.
 func unknownLimit(t *testing.T, d time.Duration) {
@@ -143,7 +149,7 @@ func TestUnroutedUnknownHoldAnsweredSooner(t *testing.T) {
 // answered, not cut off.
 func TestUnroutedSlowBodyNotCutOff(t *testing.T) {
 	unroutedLimits(t, 20*time.Millisecond, time.Hour)
-	unknownLimit(t, 100*time.Millisecond)
+	unknownLimit(t, ownWorkRoom)
 	s, _ := slowEyed(t, 0)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -154,7 +160,7 @@ func TestUnroutedSlowBodyNotCutOff(t *testing.T) {
 	if _, err := pw.Write([]byte(unroutedHi[:half])); err != nil {
 		t.Fatal(err)
 	}
-	if r := heldPast(t, watchedHold(t, s), 3*unroutedUnknown, got); r != nil {
+	if r := heldPast(t, watchedHold(t, s), unroutedUnknown*3/2, got); r != nil {
 		t.Fatalf("answered %d %q %v while its body was still arriving", r.code, r.body, r.err)
 	}
 	if _, err := pw.Write([]byte(unroutedHi[half:])); err != nil {
@@ -197,7 +203,7 @@ func (m gatedMasker) Text(s string) (string, int)            { return s, 0 }
 // for longer than unroutedUnknown is routed once masked, not cut off.
 func TestUnroutedMaskingNotCutOff(t *testing.T) {
 	unroutedLimits(t, 20*time.Millisecond, time.Hour)
-	unknownLimit(t, 100*time.Millisecond)
+	unknownLimit(t, ownWorkRoom)
 	s, _ := slowEyed(t, 0)
 	if err := settings.Save(settings.Settings{Redact: true}); err != nil {
 		t.Fatal(err)
@@ -212,7 +218,7 @@ func TestUnroutedMaskingNotCutOff(t *testing.T) {
 	t.Cleanup(srv.Close)
 	got := posted(srv, strings.NewReader(unroutedHi))
 	u := watchedHold(t, s)
-	if r := heldPast(t, u, 3*unroutedUnknown, got); r != nil {
+	if r := heldPast(t, u, unroutedUnknown*3/2, got); r != nil {
 		t.Fatalf("answered %d %q %v while it was masked", r.code, r.body, r.err)
 	}
 	if u.masking.Load() == 0 {
@@ -229,7 +235,7 @@ func TestUnroutedMaskingNotCutOff(t *testing.T) {
 // unroutedUnknown is not cut off: the queue is a known wait.
 func TestUnroutedSlotWaitNotCutOff(t *testing.T) {
 	unroutedLimits(t, 20*time.Millisecond, time.Hour)
-	unknownLimit(t, 100*time.Millisecond)
+	unknownLimit(t, ownWorkRoom)
 	s, up := slowEyed(t, 0)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
@@ -248,7 +254,7 @@ func TestUnroutedSlotWaitNotCutOff(t *testing.T) {
 		queued := false
 		s.active.mu.Lock()
 		for _, f := range s.active.m {
-			if p, _ := f.phase.Load().(string); p == "slot" && time.Since(f.start) > 3*unroutedUnknown {
+			if p, _ := f.phase.Load().(string); p == "slot" && time.Since(f.start) > unroutedUnknown*3/2 {
 				queued = true
 			}
 		}
