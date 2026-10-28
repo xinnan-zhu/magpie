@@ -43,6 +43,8 @@ func sshError(stderr string, err error) error {
 		code, msg = "needs_auth", "Authenticate with system SSH or unlock your key in ssh-agent, then reconnect"
 	case strings.Contains(stderr, "forwarding failed"), strings.Contains(stderr, "cannot listen"):
 		code, msg = "forward_failed", "SSH forwarding was refused or the port is occupied"
+	case strings.Contains(stderr, "This release does not support SSH control"):
+		code, msg = "unsupported_release", "This release does not support SSH control; choose a compatible Magpie build"
 	}
 	return &SSHError{code, msg}
 }
@@ -240,14 +242,14 @@ func (c *Connection) Close() {
 
 // OperationContext bounds a management operation by both its caller and this
 // connection's lifetime. Closing the plugin cancels pending SSH children too.
-func (c *Connection) OperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	bound, cancel := context.WithTimeout(ctx, 45*time.Second)
+func (c *Connection) OperationContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	bound, cancel := context.WithTimeout(ctx, timeout)
 	stop := context.AfterFunc(c.ctx, cancel)
 	return bound, func() { stop(); cancel() }
 }
 
 func (c *Connection) Call(ctx context.Context, req Request, out any) error {
-	ctx, cancel := c.OperationContext(ctx)
+	ctx, cancel := c.OperationContext(ctx, 45*time.Second)
 	defer cancel()
 	return Call(ctx, c.Host, req, out)
 }
@@ -275,7 +277,7 @@ func (c *Connection) API(ctx context.Context, path string, body any, out any) er
 // OpenWeb forwards only the service's loopback Web port. A one-use local link
 // signs in to a local proxy; the remote Web key never reaches the browser.
 func (c *Connection) OpenWeb(ctx context.Context) (string, error) {
-	ctx, cancelOp := c.OperationContext(ctx)
+	ctx, cancelOp := c.OperationContext(ctx, 45*time.Second)
 	defer cancelOp()
 	if !c.Inspection.Ready {
 		return "", errors.New("the remote Web service is unavailable")

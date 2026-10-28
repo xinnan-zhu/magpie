@@ -16,7 +16,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       const context = await browser.newContext({viewport:{width,height:820},reducedMotion:'reduce'});
       const page = await context.newPage(); page.setDefaultTimeout(5000);
       const errors = [], posted = [];
-      let configState = 'ready';
+      let configState = 'ready', remoteMode = 'ready', failDeploy = false;
       let pauseHostRefresh = false, releaseHostRefresh;
       const hostRefreshGate = new Promise(resolve => { releaseHostRefresh = resolve; });
       page.on('pageerror', e => errors.push(e.message));
@@ -46,8 +46,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         }
         if(url.pathname === '/api/ssh/connections') {
           await held;
-          return json({id:'snapshot-a',host:hosts.find(h => h.id === req.postDataJSON().host),inspection:{installed:true,compatible:true,ready:true,service:{Installed:true,Running:true},context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
+          return json({id:'snapshot-a',host:hosts.find(h => h.id === req.postDataJSON().host),inspection:{installed:remoteMode !== 'missing',compatible:remoteMode !== 'missing',ready:remoteMode === 'ready',service:{Installed:remoteMode === 'ready',Running:remoteMode === 'ready'},context:{hostname:'remote-a',user:'fixture-user',os:'linux',arch:'amd64',version:'fixture',config:'/remote/magpie',gateway:'http://127.0.0.1:3425'}}});
         }
+        if(url.pathname.endsWith('/deploy')) {
+          remoteMode = failDeploy ? 'stopped' : 'ready';
+          if(failDeploy) return route.fulfill({status:500,body:'fixture installation failed'});
+          return json(true);
+        }
+        if(url.pathname.endsWith('/service')) { remoteMode = 'ready'; return json({}); }
         if(url.pathname.endsWith('/agents')) return json(agents);
         if(url.pathname.endsWith('/pick')) { agents[0].fields[0].value=req.postDataJSON().value; return json({agents}); }
         if(url.pathname.endsWith('/tunnel')) return json({provider:'ssh-fixture',port:3431});
@@ -159,6 +165,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         assert.equal(await page.locator('#ssh-host-port').isEnabled(),true);
         await hostEditor.getByRole('button',{name:words('Cancel'),exact:true}).click();
       }
+      remoteMode = 'missing';
+      await view.getByRole('button',{name:words('Connect'),exact:true}).click();
+      await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
+      await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
+      assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).length,1,'one click deploys and starts');
+      assert.equal(posted.find(([p]) => p.endsWith('/deploy'))[1].start,true);
+      assert.equal(posted.filter(([p]) => p.endsWith('/service')).length,0,'no second install click');
+      remoteMode = 'missing'; failDeploy = true;
+      await view.getByRole('button',{name:words('Host actions'),exact:true}).click();
+      await page.getByRole('menuitem',{name:words('Reconnect'),exact:true}).click();
+      await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
+      await view.getByRole('button',{name:words('Install and start remote service'),exact:true}).waitFor();
+      assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).length,2,'failed mutations are not retried');
+      await view.getByRole('button',{name:words('Install and start remote service'),exact:true}).click();
+      await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
+      assert.equal(posted.filter(([p]) => p.endsWith('/service')).length,1,'service-only recovery after a partial install');
       assert.deepEqual(errors,[],`${lang} ${width}: configuration choices`);
       await context.close();
     }

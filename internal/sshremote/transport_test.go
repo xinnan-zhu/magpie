@@ -68,6 +68,9 @@ func fakeSSH() int {
 	if e := json.NewDecoder(os.Stdin).Decode(&req); e != nil {
 		return 4
 	}
+	if scenario := os.Getenv("MAGPIE_SSH_INSTALL_FIXTURE"); scenario != "" {
+		return fakeInstallation(req, scenario)
+	}
 	var out any
 	switch req.Method {
 	case "inspect":
@@ -178,17 +181,15 @@ func TestForwardedWebAuthenticatesAndCloses(t *testing.T) {
 		t.Fatal("forward survived connection close")
 	}
 }
-func TestDeployChecksDigestAndKeepsPrevious(t *testing.T) {
+func TestDeployChecksDigestAndArchitectureBeforeSSH(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX remote upload")
 	}
 	home := sshHome(t)
 	bin := filepath.Join(home, "bin")
-	put(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nfor arg do last=$arg; done\nexec /bin/sh -c \"$last\"\n")
+	record := filepath.Join(home, "uploaded")
+	put(t, filepath.Join(bin, "ssh"), "#!/bin/sh\ncat > "+quote(record)+"\n")
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
-	if runtime.GOOS == "darwin" {
-		put(t, filepath.Join(bin, "sha256sum"), "#!/bin/sh\nexec /usr/bin/shasum -a 256 \"$@\"\n")
-	}
 	data := make([]byte, 64)
 	copy(data, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
 	binary.LittleEndian.PutUint16(data[16:], 2)
@@ -206,28 +207,15 @@ func TestDeployChecksDigestAndKeepsPrevious(t *testing.T) {
 	if e := Deploy(context.Background(), h, s, path, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("checksum mismatch accepted")
 	}
-	if _, e := os.Stat(filepath.Join(home, ".local/lib/magpie/ssh/magpie")); !os.IsNotExist(e) {
+	if _, e := os.Stat(record); !os.IsNotExist(e) {
 		t.Fatal("upload ran before validation", e)
 	}
 	if e := Deploy(context.Background(), h, s, path, digest); e != nil {
 		t.Fatal(e)
 	}
-	data = append(data, 'n', 'e', 'w')
-	if e := os.WriteFile(path, data, 0600); e != nil {
-		t.Fatal(e)
-	}
-	sum = sha256.Sum256(data)
-	digest = hex.EncodeToString(sum[:])
-	if e := Deploy(context.Background(), h, s, path, digest); e != nil {
-		t.Fatal(e)
-	}
-	old, e := os.ReadFile(filepath.Join(home, ".local/lib/magpie/ssh/magpie.previous"))
-	if e != nil || len(old) != 64 {
-		t.Fatal("previous installation lost", len(old), e)
-	}
-	st, e := os.Stat(filepath.Join(home, ".local/lib/magpie/ssh/magpie"))
-	if e != nil || st.Mode().Perm() != 0700 {
-		t.Fatal(st, e)
+	uploaded, e := os.ReadFile(record)
+	if e != nil || string(uploaded) != string(data) {
+		t.Fatal("wrong upload", e)
 	}
 	if e := Deploy(context.Background(), h, Inspection{Context: Context{OS: "linux", Arch: "arm64"}}, path, digest); e == nil {
 		t.Fatal("wrong architecture accepted")

@@ -3,6 +3,7 @@ package gui
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/provider"
@@ -85,9 +86,19 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 		writeJSON(w, out)
 	}))
 	mux.HandleFunc("POST /api/ssh/connections/{id}/deploy", desktop(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Start bool `json:"start"`
+		}
+		if !sshDecode(w, r, &in) {
+			return
+		}
 		c, e := sshremote.Desktop.Get(r.PathValue("id"))
 		if e != nil {
 			fail(w, e)
+			return
+		}
+		if in.Start && c.Inspection.Installed {
+			http.Error(w, "reconnect to manage the existing installation", http.StatusConflict)
 			return
 		}
 		name, e := sshremote.ArtifactName(c.Inspection)
@@ -95,7 +106,7 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 			fail(w, e)
 			return
 		}
-		ctx, cancel := c.OperationContext(r.Context())
+		ctx, cancel := c.OperationContext(r.Context(), 5*time.Minute)
 		defer cancel()
 		path, digest, cleanup, e := update.DownloadCLI(ctx, "linux", name[len("magpie-cli-linux-"):])
 		if e != nil {
@@ -106,6 +117,12 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 		if e = sshremote.Deploy(ctx, c.Host, c.Inspection, path, digest); e != nil {
 			fail(w, e)
 			return
+		}
+		if in.Start {
+			if _, e = sshremote.InstallService(ctx, c.Host); e != nil {
+				fail(w, e)
+				return
+			}
 		}
 		writeJSON(w, true)
 	}))

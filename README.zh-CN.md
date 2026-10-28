@@ -285,6 +285,8 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 或手动填写 SSH 别名、`user@host` 和可选端口。选择已有配置时沿用其密钥和跳板机设置。
 可探测用户服务、查看实际配置目录、打开远端 Web，并用远端原有适配器
 连接 Claude Code/Codex、点选模型。插件可关闭，未连接时不启动 SSH。
+目标 Linux 主机未安装 Magpie 时，可点「安装并启动 Magpie」，自动校验和上传
+完整的无 GUI 程序，再安装用户服务；不需要远端安装 Go，也不会自动提权或开启 LAN。
 
 模型来源可共存：保留远端已有配置；把本机网关作为 SSH 隧道上的 Remote
 Magpie provider；或选择 API providers/显式路由组，预览后新增到远端。
@@ -299,6 +301,8 @@ providers 可继续运行；本机隧道来源会不可用，不自动切换收�
 首版部署仅支持 Linux amd64/arm64；需兼容版本和带鉴权的 loopback 用户
 Web 服务。正式发布包含 SSH 功能前，可自行构建 Linux CLI，再使用
 `magpie ssh install <主机-id> <binary> <sha256>` 部署。
+一键安装要求更新源提供兼容 SSH 管理的安装包，旧包会被拒绝。Linux 还需可用的
+systemd 用户服务；若系统会在退出 SSH 后停止用户服务，页面会展示相应提示。
 完整用法、恢复方式和实机验证限制见 [SSH 管理](docs/subsystems/ssh-management.md)
 及 [验证记录](docs/ssh-validation.md)。
 

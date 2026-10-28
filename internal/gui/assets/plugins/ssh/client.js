@@ -2,7 +2,7 @@
 // stays on the selected remote Magpie; a late reply never changes another host.
 magpie.plugin("ssh", (ctx) => {
   const { el, button, menu } = ctx.ui;
-  let page, hosts = [], selected = "", connection = null, generation = 0, busy = false, agents = [], tunnel = null, tunnelPort = 3431;
+  let page, hosts = [], selected = "", connection = null, generation = 0, busy = false, installing = false, agents = [], tunnel = null, tunnelPort = 3431;
   const current = () => hosts.find((h) => h.id === selected);
   const endpoint = (part, c = connection) => "ssh/connections/" + encodeURIComponent(c.id) + "/" + part;
   const heading = (text) => { const h = el("div", "ehead"); h.append(el("b", "", text)); return h; };
@@ -21,7 +21,7 @@ magpie.plugin("ssh", (ctx) => {
     b.disabled = busy; return b;
   }
   async function forget() {
-    generation++; busy = false; agents = []; tunnel = null;
+    generation++; busy = false; installing = false; agents = []; tunnel = null;
     const old = connection; connection = null;
     if (old) await fetch("/api/ssh/connections/" + encodeURIComponent(old.id), { method: "DELETE" });
   }
@@ -45,6 +45,17 @@ magpie.plugin("ssh", (ctx) => {
   async function readAgents(g) {
     const c = connection, out = await api(endpoint("agents", c));
     if (g === generation && c === connection) agents = out;
+  }
+  async function deploy(g, start) {
+    const bound = connection;
+    installing = start; draw();
+    try { await api(endpoint("deploy", bound), { start }); }
+    catch (e) {
+      if (g === generation && bound === connection) await connect(g).catch(() => {});
+      throw e;
+    }
+    finally { if (g === generation) installing = false; }
+    if (g === generation && bound === connection) await connect(g);
   }
   function addHost(existing = {}) {
     const ed = editor(); ed.classList.add("ssh-host-editor");
@@ -227,10 +238,11 @@ magpie.plugin("ssh", (ctx) => {
     val.append(more); row.append(who, val); card.append(row);
     if (!connection) { for (const b of page.querySelectorAll("button")) b.disabled = busy; return; }
     if (s.problem) card.append(el("p", "ssh-note sub", s.problem));
+    for (const advice of s.service.Advice || []) card.append(el("p", "ssh-note sub", advice));
     if (!s.ready) {
       const verb = s.service.Installed ? "start" : "install";
       const control = !s.installed || !s.compatible
-        ? action("Deploy verified Magpie", async (g) => { await api(endpoint("deploy"), {}); await connect(g); })
+        ? action(s.installed ? "Deploy verified Magpie" : installing ? "Installing Magpie…" : "Install and start Magpie", (g) => deploy(g, !s.installed))
         : action(verb === "start" ? "Start remote service" : "Install and start remote service", async (g) => { await api(endpoint("service"), { action: verb }); await connect(g); });
       setting(card, "SSH management", c.config || h.target, control);
     } else {

@@ -60,20 +60,36 @@ update feed, mirror and checksum verifier (`update.DownloadCLI`). The CLI also
 accepts an offline binary plus its SHA-256. `Deploy` checks the ELF architecture
 and digest, uploads via stdin into a private temporary file, checks the digest
 again on the target, and atomically replaces the managed binary, retaining
-`magpie.previous`. It preserves PATH installations and refuses a managed
+`magpie.previous`. Before replacement, the candidate's side-effect-free help
+must advertise SSH control; older published artifacts are rejected. A missing
+installation may not replace a managed binary that appeared after its probe.
+It preserves PATH installations and refuses a managed
 portable `data/` directory or an explicit binary path. A killed upload leaves
 the previous executable intact; an uncatchable remote kill can leave
 `deploy.lock`, which must be inspected and removed on the target before retry.
 
-Service installation is a separate explicit action using `daemon.Install`,
-with authenticated loopback Web on 3430. It refuses to replace an existing
-service. Starting a service preserves its options, executable and environment.
+For an absent installation, **Install and start Magpie** explicitly chains
+the verified upload with [`InstallService`](../../internal/sshremote/deploy.go):
+reinspect the uploaded binary, verify the SSH protocol/context, call the
+existing `daemon.Install` with authenticated loopback Web on 3430, then poll
+read-only until that Web service is ready. It refuses an existing service,
+even if one appeared while downloading. Downloads and setup share a
+five-minute connection-bound context; startup polling is bounded to 20 seconds.
+A lost mutation reply is never retried. The page reinspects after failure so
+an uploaded binary with a failed service can resume with a service-only action.
+The CLI's explicit offline upload and existing-installation deployment retain
+their upload-only behavior; service install/start are also offered separately.
+Starting a service preserves its options, executable and environment.
 The shell and serving context can differ; agent management always uses the
 serving context. This version discovers Magpie's installed user daemon, not
 arbitrary system/root services or manually started Web processes. An existing
 service without authenticated loopback Web needs `magpie daemon web on` on the
 target. Older services need an ordinary update before management works; an
 uploaded helper does not replace their service definition.
+No sudo or system package manager is run. Linux needs an accessible systemd
+user manager. Existing service advice is shown, including the command to enable
+user lingering when the service would stop on logout; installation does not
+change that operating-system policy by itself.
 
 `OpenWeb` creates an OpenSSH local forward to that service's loopback Web port,
 verifies its authenticated context, then opens a one-use local login link. A

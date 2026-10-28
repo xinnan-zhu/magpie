@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/proc"
 )
@@ -65,8 +66,7 @@ func Deploy(ctx context.Context, h Host, s Inspection, path, digest string) erro
 	if _, err = f.Seek(0, 0); err != nil {
 		return err
 	}
-	script := `set -eu; umask 077; d="$HOME/.local/lib/magpie/ssh"; mkdir -p "$d"; if [ -e "$d/data" ]; then exit 1; fi; mkdir "$d/deploy.lock"; t=$(mktemp "$d/upload.XXXXXXXX"); trap 'rm -f "$t"; rmdir "$d/deploy.lock"' EXIT HUP INT TERM; cat > "$t"; printf '%s  %s\n' ` + quote(strings.ToLower(digest)) + ` "$t" | sha256sum -c - >/dev/null; chmod 700 "$t"; if [ -f "$d/magpie" ]; then cp -p "$d/magpie" "$d/magpie.previous"; fi; mv -f "$t" "$d/magpie"`
-	args := append(BaseArgs(h, false), "--", h.Target, script)
+	args := append(BaseArgs(h, false), "--", h.Target, uploadScript(digest, s.Installed))
 	cmd := proc.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = f
 	stderr := &boundedBuffer{limit: 8192}
@@ -75,6 +75,46 @@ func Deploy(ctx context.Context, h Host, s Inspection, path, digest string) erro
 		return sshError(stderr.String(), err)
 	}
 	return nil
+}
+
+func uploadScript(digest string, replace bool) string {
+	existing := ""
+	if !replace {
+		existing = `if [ -e "$d/magpie" ]; then printf '%s\n' 'An installation appeared; reconnect before another action.' >&2; exit 1; fi; `
+	}
+	return `set -eu; umask 077; d="$HOME/.local/lib/magpie/ssh"; mkdir -p "$d"; if [ -e "$d/data" ]; then exit 1; fi; mkdir "$d/deploy.lock"; t=$(mktemp "$d/upload.XXXXXXXX"); trap 'rm -f "$t"; rmdir "$d/deploy.lock"' EXIT HUP INT TERM; ` + existing + `cat > "$t"; printf '%s  %s\n' ` + quote(strings.ToLower(digest)) + ` "$t" | sha256sum -c - >/dev/null; chmod 700 "$t"; if ! "$t" --help 2>/dev/null | grep -q 'magpie ssh-control'; then printf '%s\n' 'This release does not support SSH control; no existing installation was replaced.' >&2; exit 1; fi; if [ -f "$d/magpie" ]; then cp -p "$d/magpie" "$d/magpie.previous"; fi; mv -f "$t" "$d/magpie"`
+}
+
+// InstallService follows an explicit deployment with the original daemon
+// installer. It rechecks the actual context and never replaces a service.
+// Startup polling is read-only; a lost install reply is never retried.
+func InstallService(ctx context.Context, h Host) (Inspection, error) {
+	var s Inspection
+	if err := Call(ctx, h, Request{Method: "inspect"}, &s); err != nil {
+		return s, err
+	}
+	if !s.Installed || !s.Compatible || s.Protocol != Protocol || s.Context.Target == "" {
+		return s, errors.New("this release does not support SSH control; update remote Magpie before installing its service")
+	}
+	if s.Service.Installed {
+		return s, errors.New("an existing service was found; reconnect to manage it without replacing its settings")
+	}
+	if err := Call(ctx, h, Request{Method: "service-install", Target: s.Context.Target}, &s); err != nil {
+		return s, fmt.Errorf("service installation result unconfirmed; reconnect before another action: %w", err)
+	}
+	wait, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	for !s.Ready {
+		select {
+		case <-wait.Done():
+			return s, errors.New("Magpie was installed but its Web service is not ready; reconnect to inspect the service")
+		case <-time.After(250 * time.Millisecond):
+		}
+		if err := Call(wait, h, Request{Method: "inspect"}, &s); err != nil {
+			return s, fmt.Errorf("Magpie was installed but its status is unavailable; reconnect: %w", err)
+		}
+	}
+	return s, nil
 }
 
 func ArtifactName(s Inspection) (string, error) {

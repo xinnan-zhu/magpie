@@ -22,11 +22,15 @@ server, subscription account, or installed Claude Code/Codex version.
 
 ## Checks and results
 
+This table records the initial implementation checks. The dated follow-ups
+below record later changes and their remaining failures; an earlier pass is
+not a green full-suite result for the current branch.
+
 | Check | Result |
 | --- | --- |
-| `go vet ./...` | Passed on final source |
-| `GOOS=linux GOARCH=amd64 go vet -tags nogui ./...` | Passed on final source |
-| `GOOS=windows GOARCH=amd64 go vet ./...` | Passed on final source |
+| `go vet ./...` | Passed |
+| `GOOS=linux GOARCH=amd64 go vet -tags nogui ./...` | Passed |
+| `GOOS=windows GOARCH=amd64 go vet ./...` | Passed |
 | macOS desktop, Linux amd64/arm64 nogui, Windows amd64 builds | Passed |
 | `go test -tags nogui -timeout 45m ./...` | Passed; final GUI API/budget guards also rerun after lifecycle changes |
 | SSH/access/provider/gateway/GUI concurrency regressions, `-race -count=20` | Passed; provider and transport rerun after the final fixes |
@@ -68,12 +72,66 @@ the alias with no port override; saving does not start a connection.
   editing, switching to manual input, empty/failed config reads and disposal.
 - Negative Go overlay ignoring Include directives: `TestSSHConfigHosts`
   failed with missing included aliases; the unchanged implementation passes.
-- New full Go and GUI runs are in progress, not green results. Logs are
+- That full Go run was superseded after installation development changed
+  its discovered test-file set mid-run (`fakeInstallation` was not included
+  in its earlier file list). It is not a final-source result. The GUI run
+  was stopped with exit status 2 after recorded failures. Logs are
   `/private/tmp/magpie-ssh-config-suite.log` and
   `/private/tmp/magpie-ssh-config-gui-suite.log`; matching `.exit` files contain
-  the exit status when each finishes. The GUI run uses concurrency 1.
+  the exit status. The GUI run used concurrency 1.
 - Formatting and `git diff --check` passed. No real SSH host or credentials
   were used; real host policies and agent sessions remain unverified.
+
+### One-click installation follow-up (2026-10-28)
+
+A missing Linux host now offers **Install and start Magpie**. The existing
+verified update download and SSH upload are followed by protocol/context
+inspection, the original user daemon installer and authenticated Web readiness.
+Existing services are refused, failed mutations are not retried, and the page
+refreshes status after failure for service-only recovery. The remote upload
+checks the candidate's help before replacing an installation and refuses an
+installation that appeared since an absent-host probe.
+
+- Passed the actual desktop deploy API using a local update feed and a fake
+  SSH executable, including checksum failure with no upload/service write.
+- Passed final `-race -count=20` installation, upload and API regressions in
+  `internal/sshremote` and `internal/gui`. The remote upload script itself runs
+  against executable shell fixtures; ELF architecture checks run separately.
+  No Linux executable is claimed to have run on macOS.
+- Passed the SSH UI and i18n checks: 6 top-level tests, both engines, five
+  languages, 1100/420px. Cases cover one-click completion, post-failure status
+  refresh, no automatic mutation retry and service-only recovery.
+- Removing the upload compatibility check, existing-service check and Web
+  readiness wait with a Go overlay makes their tests fail with an accepted
+  older release, an unexpected existing-service install and a not-ready result.
+- The host-save race found during this work is a separate commit: a held
+  list read fails the old page with `finish the host refresh before returning
+  to row actions`. Its independent base-plus-fix asset copy passes both
+  engines, all five languages and 1100/420px.
+- Passed macOS/Linux amd64/Windows amd64 vet; macOS desktop, Linux amd64/arm64
+  static nogui and Windows amd64 builds. The preview launcher has both locally
+  built Linux artifacts behind the existing `MAGPIE_UPDATE_FEED` test hook;
+  its local HTTP download/hash check passed. These artifacts are not published.
+  This avoids relying on a public release that does not contain SSH yet.
+- The final-source full Go run completed with exit status 1 in
+  `/private/tmp/magpie-ssh-install-suite.log` (matching `.exit`). All packages
+  except `internal/gateway` passed. That package failed
+  `TestClientGoneRecordedAsCanceled`, `TestUnroutedSlowBodyNotCutOff` and
+  `TestUnroutedMaskingNotCutOff`;
+  the isolated `-race -count=20` investigation exited 1 in
+  `/private/tmp/magpie-ssh-gateway-investigate.log`. It found a real request
+  header race: `unroutedHold.showLocked` reads through `callerOf` while
+  `decodedBody` deletes a header. The three original full-run failures and
+  this race remain unresolved; this branch is not ready to ship or submit
+  as fully verified. Reproduce the investigation with
+  `go test -race -count=20 -tags nogui ./internal/gateway -run
+  '^(TestClientGoneRecordedAsCanceled|TestUnroutedSlowBodyNotCutOff|TestUnroutedMaskingNotCutOff)$'`
+  under the isolated-HOME procedure below.
+  The full GUI suite is not green: it was stopped with exit status 2 after
+  WebKit zh-TW agent-label/settings failures, alongside the older incomplete
+  run's untriaged failures. Focused passes do not make that suite green.
+  No real SSH host, real systemd session,
+  private-key content or live agent/subscription was used.
 
 The concurrency command is:
 
@@ -127,10 +185,12 @@ operator. Do not point them at a user's existing agent accounts.
    the host key/authentication using system OpenSSH in a terminal. Add its
    trusted alias in Remote hosts. Inspect an empty target and verify probing
    does not initialize Magpie or discover agent accounts.
-2. Deploy explicitly with `magpie ssh install <host-id> <binary> <sha256>`.
-   The GUI's update-feed deployment needs a published release containing
-   this SSH protocol; an older official binary cannot provide it. Install
-   the user daemon explicitly, or start its existing compatible daemon.
+2. On an absent Linux installation, use **Install and start Magpie** and
+   verify it reaches the ready state with one click. The GUI's update-feed
+   deployment needs an artifact containing this SSH protocol; an older
+   official binary cannot provide it. For an offline check, deploy explicitly
+   with `magpie ssh install <host-id> <binary> <sha256>` and install the user
+   daemon separately. For an existing compatible daemon, start that service.
    Verify executable, user, HOME and configuration match the displayed
    serving context, including a shell/service environment that differs.
 3. Open remote Web, confirm existing providers are preserved, and exercise

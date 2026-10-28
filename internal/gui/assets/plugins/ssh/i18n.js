@@ -1,5 +1,7 @@
 magpie.strings({
   "zh": {
+    "Install and start Magpie": "安装并启动 Magpie",
+    "Installing Magpie…": "正在安装 Magpie…",
     "Enter manually": "手动填写",
     "No hosts found in ~/.ssh/config. Enter a destination manually.": "未在 ~/.ssh/config 中找到主机，请手动填写连接目标。",
     "Could not read SSH configuration. Enter a destination manually.": "无法读取 SSH 配置，请手动填写连接目标。",
@@ -39,6 +41,8 @@ magpie.strings({
     "Configuration copied": "配置已复制"
   },
   "zh-TW": {
+    "Install and start Magpie": "安裝並啟動 Magpie",
+    "Installing Magpie…": "正在安裝 Magpie…",
     "Enter manually": "手動填寫",
     "No hosts found in ~/.ssh/config. Enter a destination manually.": "未在 ~/.ssh/config 中找到主機，請手動填寫連線目標。",
     "Could not read SSH configuration. Enter a destination manually.": "無法讀取 SSH 設定，請手動填寫連線目標。",
@@ -78,6 +82,8 @@ magpie.strings({
     "Configuration copied": "設定已複製"
   },
   "ja": {
+    "Install and start Magpie": "Magpie をインストールして開始",
+    "Installing Magpie…": "Magpie をインストール中…",
     "Enter manually": "手動で入力",
     "No hosts found in ~/.ssh/config. Enter a destination manually.": "~/.ssh/config にホストがありません。接続先を手動で入力してください。",
     "Could not read SSH configuration. Enter a destination manually.": "SSH 設定を読み込めません。接続先を手動で入力してください。",
@@ -117,6 +123,8 @@ magpie.strings({
     "Configuration copied": "設定をコピーしました"
   },
   "de": {
+    "Install and start Magpie": "Magpie installieren und starten",
+    "Installing Magpie…": "Magpie wird installiert…",
     "Enter manually": "Manuell eingeben",
     "No hosts found in ~/.ssh/config. Enter a destination manually.": "Keine Hosts in ~/.ssh/config gefunden. Ziel manuell eingeben.",
     "Could not read SSH configuration. Enter a destination manually.": "SSH-Konfiguration konnte nicht gelesen werden. Ziel manuell eingeben.",
