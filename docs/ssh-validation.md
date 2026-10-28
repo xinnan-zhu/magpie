@@ -156,6 +156,27 @@ node --test --test-concurrency=1 \
   internal/gui/tests/gateway-mode.test.cjs
 ```
 
+### Page layout follow-up (2026-10-28)
+
+The page now follows Providers and Agents: every saved host is a row of one
+list (no host picker), ＋ Add SSH host sits under it, a host's state is a dot
+and a line under its name with the one fixing click on its row, and Edit,
+Remove, Reconnect, Disconnect and the remote environment are in the row's
+"…" menu. A ready host's agents are read on connect and use the Agents page's
+switch; switching off opens the disconnect preview. Dialogs foot Cancel and
+the primary action at the right.
+
+- Passed `ssh.test.cjs` and `i18n-keys.test.cjs` in Chromium and WebKit, five
+  languages, 1100/420px; also `gui-zh-tw`, `gui-ja`, `gui-de`, `builtins`,
+  `sidebar`, `brand`, `gateway-mode`, `ux-safety`, `page-width`,
+  `click-scroll`, `settings-lines-wrap` and `user-select`.
+- Making the switch disconnect without its preview fails `ssh.test.cjs`
+  waiting for the preview's file path; restored, it passes.
+- A macOS desktop build with these assets was made for the preview launcher.
+  The page was compared with Providers, Agents and the provider editor in
+  screenshots of the fixtures, light and dark; no real host was connected.
+  `i18n.test.cjs`, named in the commands above, does not exist in the tree.
+
 ## Failure checks and independent fixes
 
 - Reversing the exact-key guard with a temporary Go overlay makes

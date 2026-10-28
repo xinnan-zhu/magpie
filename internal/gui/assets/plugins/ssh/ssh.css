@@ -1,32 +1,61 @@
 body.web .ssh-nav { display: none !important; }
-#view-ssh .row-head { margin: 14px 0 6px; padding: 0 2px; gap: 6px; height: auto; min-height: 26px; flex-wrap: wrap; }
-#view-ssh > .row-head:first-child { margin-top: 4px; }
-#view-ssh .row-head .proto { max-width: 40%; }
-#view-ssh .row .sub { white-space: normal; overflow-wrap: anywhere; }
-#view-ssh .val { flex-wrap: wrap; justify-content: flex-end; }
-.ssh-note { padding: 12px 14px; margin: 0; font-size: 12px; line-height: 1.5; }
+#view-ssh .row-head { margin: 18px 0 6px; padding: 0 2px; gap: 6px; }
+#view-ssh .val { display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+/* a host's row, as a provider's: its glyph, its name over its state, its actions */
+.ssh-hosts .row.ssh-host { min-height: 52px; gap: 11px; padding: 7px 9px 7px 13px; }
+.ssh-glyph { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: 7px; background: var(--pill); color: var(--fg-2); }
+.ssh-host.on .ssh-glyph { color: var(--fg); }
+.editor .ehead .ssh-glyph { width: 22px; height: 22px; }
+.ssh-host + .ssh-host, .ssh-note + .ssh-host { border-top: 1px solid var(--line-2); }
+.ssh-st { margin-top: 2px; }
+.ssh-st .ag-st-t { user-select: text; -webkit-user-select: text; }
+#view-ssh .val > .ssh-st { flex: none; width: auto; margin: 0 4px 0 0; }
+.ssh-more { width: 24px; height: 24px; }
+.ssh-refresh { width: 22px; height: 22px; }
+/* what a connected host says of itself, under its row and lined up with its name */
+.ssh-note { margin: 0; padding: 0 14px 10px 48px; font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.ssh-empty { padding: 12px 14px; font-size: 12px; color: var(--muted); }
+#view-ssh .row.ssh-agent { gap: 10px; }
+#view-ssh .row.pref .sub, .ssh-agent .ag-st-t { white-space: normal; overflow-wrap: anywhere; }
+/* dialogs: one column of what they say, the host's fields beside their names */
 .ssh-editor { grid-template-columns: minmax(0, 1fr); }
-.ssh-host-editor { grid-template-columns: 110px minmax(0, 1fr); }
-.ssh-host-editor .ebody > .sub { grid-column: 1 / -1; }
-.ssh-config-picker .proto { max-width: 100%; }
-.ssh-host-editor .ebody > .sub:empty { display: none; }
-.ssh-editor .ebody > .sub { margin: 0; line-height: 1.5; font-size: 12px; color: var(--muted); }
-.ssh-input { display: grid; gap: 6px; }
-.ssh-editor label { text-align: left; padding-top: 0; }
-.ssh-host-editor label { text-align: right; padding-top: 5px; }
-.ssh-input input { min-width: 0; }
-.ssh-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px 18px; font-size: 12px; }
-.ssh-facts code, .ssh-command { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
-.ssh-check { display: flex; align-items: center; gap: 8px; }
-.ssh-snippet { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 7px; background: var(--pill); }
-.ssh-snippet code { flex: 1; min-width: 0; font-size: 12px; }
-.ssh-copy-entry .ssh-command { display: block; margin-top: 6px; }
+.ssh-host-editor { grid-template-columns: minmax(72px, max-content) minmax(0, 1fr); }
+.ssh-host-editor .ebody > .hint { grid-column: 2; margin-top: -6px; }
+.ssh-host-editor .ebody > .hint:empty { display: none; }
+.ssh-host-editor .ssh-say { grid-column: 1 / -1; }
+.ssh-editor .ssh-say { margin: 0; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.ssh-config-picker { display: flex; min-width: 0; }
+.ssh-config-picker .proto.pick { display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; height: 27px; padding: 0 8px 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--fg); font: inherit; font-size: 12.5px; text-align: left; }
+.ssh-config-picker .proto.pick > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssh-config-picker .proto.pick svg { flex: none; opacity: .6; }
+.ssh-config-picker .proto.pick:disabled { color: var(--muted); }
+.ssh-editor .ssh-port { display: grid; grid-template-columns: auto 120px; align-items: center; justify-content: start; gap: 12px; }
+.ssh-editor .ssh-port label { padding-top: 0; }
+.ssh-picks-head { font-size: 11px; font-weight: 500; color: var(--muted); margin-bottom: -4px; }
+.ssh-picks .row.ssh-check { min-height: 38px; gap: 10px; cursor: default; }
+.ssh-picks .row.ssh-check + .row.ssh-check { border-top: 1px solid var(--line-2); }
+.ssh-picks .ssh-check input { flex: none; margin: 0; }
+.ssh-picks .ssh-check .who { display: flex; align-items: baseline; gap: 8px; }
+.ssh-picks .ssh-check .sub { font-family: var(--code-font, var(--code)); margin: 0; }
+.ssh-facts .row { align-items: center; gap: 14px; min-height: 36px; }
+.ssh-facts .row + .row { border-top: 1px solid var(--line-2); }
+.ssh-fact { flex: 0 0 132px; font-size: 12px; color: var(--muted); }
+.ssh-facts code, .ssh-command { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.ssh-snippets { display: grid; gap: 6px; }
+.ssh-snippet { display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 11px; border-radius: 8px; background: var(--pill); }
+.ssh-snippet code { flex: 1; min-width: 0; }
+.ssh-changes { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.ssh-copy-entry { display: grid; gap: 4px; }
+.ssh-copy-entry b { font-size: 12.5px; font-weight: 500; }
 @media (max-width: 550px) {
-  #view-ssh .row.pref { flex-wrap: wrap; }
-  #view-ssh .row.pref > .who { flex-basis: 100%; }
-  #view-ssh .row.pref > .val { max-width: 100%; }
+  #view-ssh .row.ssh-host, #view-ssh .row.ssh-agent, #view-ssh .row.pref { flex-wrap: wrap; }
+  #view-ssh .row.ssh-host > .who { flex: 1 1 calc(100% - 36px); }
+  #view-ssh .row.ssh-agent > .who { flex: 1 1 calc(100% - 36px); }
+  #view-ssh .row > .val { max-width: 100%; margin-left: auto; }
+  .ssh-note { padding-left: 14px; }
   .ssh-host-editor { grid-template-columns: minmax(0, 1fr); }
   .ssh-host-editor label { text-align: left; padding-top: 0; }
-  .ssh-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; }
-  .ssh-facts code { margin-bottom: 8px; }
+  .ssh-host-editor .ebody > .hint { grid-column: 1; margin-top: -6px; }
+  .ssh-facts .row { flex-wrap: wrap; gap: 2px 14px; padding-top: 7px; padding-bottom: 7px; }
+  .ssh-fact { flex-basis: 100%; }
 }

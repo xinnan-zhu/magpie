@@ -11,9 +11,18 @@ local agent code.
 - [`plugins/ssh`](../../plugins/ssh/ssh.go) registers the page and disposes
   [`sshremote.Manager`](../../internal/sshremote/manager.go) when switched off.
   [`client.js`](../../internal/gui/assets/plugins/ssh/client.js) uses the
-  window kernel and kit; host switches discard late replies. The page follows
-  the existing list/settings-row layout. Host actions hold context details;
-  tunnel setup and direct-session commands live in their own dialogs.
+  window kernel and kit; host switches discard late replies. The page is laid
+  out as Providers and Agents are: every saved host is a row of one list
+  (glyph, name, a dot and line for its state, its action and a "…" row menu,
+  also on right-click) with ＋ Add SSH host under it. One host is connected
+  at a time; another row's Connect releases the first. A connected host that
+  isn't ready names what is missing on its row, with the one click that
+  fixes it. A ready host's agents are read with it and listed with the
+  Agents page's switch: on connects at once, off opens the disconnect preview
+  and Cancel leaves the agent connected. The row menu holds the remote
+  environment, Reconnect, Disconnect, Edit and Remove; tunnel setup,
+  direct-session commands and the configuration copy live in their own
+  dialogs, footed as the app's editors are.
 - [`Host`](../../internal/sshremote/hosts.go) stores names, SSH destinations,
   optional ports and absolute binary paths in `ssh-hosts.json` (0600). It
   stores no SSH credentials and is outside backup/sync. OpenSSH owns host

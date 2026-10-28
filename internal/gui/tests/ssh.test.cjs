@@ -56,6 +56,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         if(url.pathname.endsWith('/service')) { remoteMode = 'ready'; return json({}); }
         if(url.pathname.endsWith('/agents')) return json(agents);
         if(url.pathname.endsWith('/pick')) { agents[0].fields[0].value=req.postDataJSON().value; return json({agents}); }
+        if(url.pathname.endsWith('/agent')) { agents[0].wired = req.postDataJSON().action === 'connect'; return json({agents}); }
+        if(url.pathname.endsWith('/preview/claude')) return json({revision:'fixture-revision',changes:[{path:'/remote/.claude/settings.json',lines:[{op:'+',text:'"model": "magpie/api/two"'}]}]});
         if(url.pathname.endsWith('/tunnel')) return json({provider:'ssh-fixture',port:3431});
         if(url.pathname === '/api/ssh/copy-choices') return json({providers:[{id:'api',name:'API fixture'}],groups:[]});
         if(url.pathname.endsWith('/copy/preview')) return json({id:'operation-fixture',ids:{api:'api-ssh'},keys:req.postDataJSON().keys});
@@ -68,7 +70,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       });
       await page.goto('http://magpie.test/?view=ssh');
       const view = page.locator('#view-ssh');
-      await view.getByRole('button',{name:words('Add SSH host'),exact:true}).click();
+      // every saved host is a row of one list, as Providers lists its own; ＋ Add sits under it
+      await view.locator('.ssh-host').nth(1).waitFor();
+      assert.equal(await view.locator('.ssh-host').count(),2);
+      assert.equal(await view.locator('.proto.pick').count(),0,'hosts are rows, not a picker');
+      const host = (id) => view.locator(`.ssh-host[data-id="${id}"]`);
+      await view.getByRole('button',{name:words('＋ Add SSH host'),exact:true}).click();
       const hostEditor = page.locator('.ssh-editor');
       assert.equal(await hostEditor.getByRole('textbox').count(),3);
       const configPicker = page.locator('#ssh-host-config');
@@ -93,7 +100,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       assert.equal(configured.target,'fixture-config');
       assert.equal(configured.port,0,'inherit the configured port instead of overriding it with 22');
       assert.equal(posted.filter(([p]) => p === '/api/ssh/connections').length,0,'saving does not connect');
-      await view.getByRole('button',{name:words('Host actions'),exact:true}).click();
+      await host('added').getByRole('button',{name:words('Host actions'),exact:true}).click();
       await page.getByRole('menuitem',{name:words('Edit'),exact:true}).click();
       await page.waitForFunction(() => !document.querySelector('#ssh-host-config').disabled);
       assert.equal(await configPicker.innerText(),'fixture-config');
@@ -110,22 +117,37 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       assert.equal(manual.id,'added');
       assert.equal(manual.target,'user@manual.test');
       assert.equal(manual.port,2222);
-      await view.getByRole('button',{name:words('Connect'),exact:true}).click();
+      await host('added').getByRole('button',{name:words('Connect'),exact:true}).click();
       await page.waitForFunction(() => [...document.querySelectorAll('#view-ssh button')].every(b => b.disabled));
+      await host('added').getByText(words('Connecting…'),{exact:true}).waitFor();
       resolveConnect();
-      await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
-      await view.getByRole('button',{name:words('Host actions'),exact:true}).click();
+      await host('added').getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
+      assert.equal(await host('a').getByRole('button',{name:words('Connect'),exact:true}).count(),1,'the other hosts stay ready to connect');
+      await host('added').getByRole('button',{name:words('Host actions'),exact:true}).click();
       await page.getByRole('menuitem',{name:words('Remote environment'),exact:true}).click();
       await page.locator('.ssh-editor').getByText('/remote/magpie',{exact:true}).waitFor();
       assert.ok(await page.getByText('remote-a · fixture-user · linux · amd64 · fixture').isVisible());
       await page.locator('.ssh-editor').getByRole('button',{name:words('Close'),exact:true}).click();
       await view.getByRole('button',{name:words('Open remote Web'),exact:true}).click();
-      await view.getByRole('button',{name:words('Manage remote agents'),exact:true}).click();
-      await view.getByRole('button',{name:'One',exact:true}).click();
+      // a ready host's agents are read with it, each with the Agents page's switch
+      const agent = view.locator('.ssh-agent[data-id="claude"]');
+      await agent.waitFor();
+      assert.equal(await agent.getByRole('switch').getAttribute('aria-checked'),'false');
+      await agent.getByRole('button',{name:'One',exact:true}).click();
       await page.getByText('Two',{exact:true}).last().click();
       await page.waitForFunction(() => document.querySelector('#view-ssh').textContent.includes('Two'));
       assert.ok(posted.some(([p,b]) => p.endsWith('/snapshot-a/pick') && b.value === 'magpie/api/two'));
       assert.equal(await page.locator('dialog[open]').count(),0,'ordinary pick needed no confirmation');
+      // on connects at once; off first shows what goes, and Cancel leaves it connected
+      await agent.getByRole('switch').click();
+      await page.waitForFunction(() => document.querySelector('.ssh-agent[data-id="claude"] [role=switch]')?.getAttribute('aria-checked') === 'true');
+      assert.ok(posted.some(([p,b]) => p.endsWith('/snapshot-a/agent') && b.action === 'connect'));
+      await agent.getByRole('switch').click();
+      await page.locator('.ssh-editor').getByText('/remote/.claude/settings.json').waitFor();
+      await page.locator('.ssh-editor').getByRole('button',{name:words('Cancel'),exact:true}).click();
+      await page.waitForFunction(() => document.querySelector('#modal').hidden);
+      assert.equal(await agent.getByRole('switch').getAttribute('aria-checked'),'true','cancelled disconnect keeps the agent connected');
+      assert.equal(posted.filter(([p,b]) => p.endsWith('/agent') && b.action === 'disconnect').length,0);
       const source = view.locator('.row.pref').filter({hasText:words('Use local gateway')});
       await source.getByRole('button',{name:words('Connect'),exact:true}).click();
       await page.locator('.ssh-editor').getByRole('button',{name:words('Connect'),exact:true}).click();
@@ -134,7 +156,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       await page.locator('.ssh-editor').getByRole('button',{name:words('Close'),exact:true}).click();
       await view.locator('.row.pref').filter({hasText:words('Copy selected configuration')}).getByRole('button',{name:words('Select'),exact:true}).click();
       const modal = page.locator('#modal');
-      await modal.getByText('API fixture · api',{exact:true}).click();
+      await modal.locator('.ssh-check').filter({hasText:'API fixture'}).click();
       assert.equal(await modal.getByRole('checkbox').last().isChecked(),false,'keys default off');
       await modal.getByRole('button',{name:words('Preview'),exact:true}).click();
       await modal.getByText('api → api-ssh',{exact:true}).waitFor();
@@ -154,11 +176,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       await page.waitForFunction(() => document.querySelector('#modal').hidden);
       assert.ok(posted.some(([p]) => p === '/api/ssh/connections/snapshot-a'),'switching off releases the connection');
       await page.evaluate(() => { applyFeatures([{id:'ssh',on:true}]); show('ssh'); });
-      await view.getByRole('button',{name:words('Connect'),exact:true}).waitFor();
+      await host('added').getByRole('button',{name:words('Connect'),exact:true}).waitFor();
       assert.equal(await view.getByRole('button',{name:words('Open remote Web'),exact:true}).count(),0,'no stale connection after enabling again');
       for (const state of ['empty','error']) {
         configState = state;
-        await view.getByRole('button',{name:words('Add SSH host'),exact:true}).click();
+        await view.getByRole('button',{name:words('＋ Add SSH host'),exact:true}).click();
         const note = state === 'empty' ? 'No hosts found in ~/.ssh/config. Enter a destination manually.' : 'Could not read SSH configuration. Enter a destination manually.';
         await hostEditor.getByText(words(note),{exact:true}).waitFor();
         assert.equal(await page.locator('#ssh-host-target').isEditable(),true);
@@ -166,14 +188,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
         await hostEditor.getByRole('button',{name:words('Cancel'),exact:true}).click();
       }
       remoteMode = 'missing';
-      await view.getByRole('button',{name:words('Connect'),exact:true}).click();
+      await host('added').getByRole('button',{name:words('Connect'),exact:true}).click();
+      await host('added').getByText(words('Magpie is not installed'),{exact:false}).waitFor();
       await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
       await view.getByRole('button',{name:words('Open remote Web'),exact:true}).waitFor();
       assert.equal(posted.filter(([p]) => p.endsWith('/deploy')).length,1,'one click deploys and starts');
       assert.equal(posted.find(([p]) => p.endsWith('/deploy'))[1].start,true);
       assert.equal(posted.filter(([p]) => p.endsWith('/service')).length,0,'no second install click');
       remoteMode = 'missing'; failDeploy = true;
-      await view.getByRole('button',{name:words('Host actions'),exact:true}).click();
+      await host('added').getByRole('button',{name:words('Host actions'),exact:true}).click();
       await page.getByRole('menuitem',{name:words('Reconnect'),exact:true}).click();
       await view.getByRole('button',{name:words('Install and start Magpie'),exact:true}).click();
       await view.getByRole('button',{name:words('Install and start remote service'),exact:true}).waitFor();
