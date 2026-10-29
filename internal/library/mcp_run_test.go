@@ -249,11 +249,35 @@ func TestRunIdleEnds(t *testing.T) {
 	}
 }
 
+// runInputHook injects a server message at the client's write boundary.
+type runInputHook struct {
+	io.WriteCloser
+	before func([]byte)
+}
+
+func (w runInputHook) Write(b []byte) (int, error) {
+	w.before(b)
+	return w.WriteCloser.Write(b)
+}
+
 // What the server asks the client mid-call comes on the call's stream, and
 // the client's answer goes to the server.
 func TestRunServerAsks(t *testing.T) {
 	srv, _, _ := runFixture(t)
 	_, a := call(t, srv, "", fmt.Sprintf(runInit, "thread-a"))
+	runs.Lock()
+	s := runs.sessions[a]
+	runs.Unlock()
+	c := s.running()
+	// A real server can write while send is still returning. Inject that
+	// scheduling order without sleeps: the progress notification reaches
+	// deliver synchronously at the write boundary, before the call is sent.
+	c.in = runInputHook{WriteCloser: c.in, before: func(b []byte) {
+		var m rpcIn
+		if json.Unmarshal(b, &m) == nil && m.Method == "tools/call" {
+			s.deliver(c, []byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}`), nil, "notifications/progress")
+		}
+	}}
 	req, _ := http.NewRequest("POST", srv.URL+RunPath+"fake", strings.NewReader(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ask"}}`))
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Session-Id", a)
@@ -273,6 +297,9 @@ func TestRunServerAsks(t *testing.T) {
 				return d
 			}
 		}
+	}
+	if q := next(); !strings.Contains(q, `"notifications/progress"`) {
+		t.Fatalf("lost notification sent before the call's write returned: %s", q)
 	}
 	if q := next(); !strings.Contains(q, `"roots/list"`) || !strings.Contains(q, `"id":77`) {
 		t.Fatalf("asked: %s", q)

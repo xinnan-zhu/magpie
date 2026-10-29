@@ -40,6 +40,11 @@ agents RTK, a CLI that cuts shell output down before the model reads it.
 
 ## Constraints and failure behavior
 
+- Codex's command-server relay ([`ServeRun`](../../internal/library/mcp_run.go))
+  registers a call's event stream before sending the call to its server.
+  Immediate server requests and notifications therefore have a receiving
+  stream even when they arrive before the send returns. The stream is removed
+  when the call ends, including a failed send (`TestRunServerAsks`).
 - magpie takes away only what `Applied` or its mark says it wrote. A folder of the user's with a skill's name is never touched. The user's own fields in an MCP entry are kept.
 - An edit never silently loses. When an agent's copy of a skill and the library both changed, the newest edit wins, and the losing one is kept with the backups.
 - An update from GitHub or a git repository never silently replaces a skill changed here. It is refused, or skipped in an update of several, until the user says to replace it, and the version replaced goes to the backups.
@@ -84,6 +89,7 @@ go test -tags nogui ./internal/library -run 'TestSkillOffHere'
 go test -tags nogui ./internal/davsync -run 'TestSkillOffHereThroughSync'
 go test -tags nogui ./internal/cli -run 'TestLibrarySkillRm'
 go test -race ./internal/mcpauth
+go test -race -tags nogui ./internal/library -run '^TestRun' -count=20
 go test -tags nogui ./internal/library
 node --test internal/gui/tests/skill-off-here.test.cjs
 node --test internal/gui/tests/library-items.test.cjs internal/gui/tests/library-mcp-hub.test.cjs internal/gui/tests/library-alma-profile.test.cjs internal/gui/tests/library-rtk-gain.test.cjs internal/gui/tests/library-rtk-nohook.test.cjs internal/gui/tests/library-servers-bulk.test.cjs internal/gui/tests/library-pick-remove.test.cjs internal/gui/tests/library-env-refs.test.cjs internal/gui/tests/library-zed-mcp.test.cjs internal/gui/tests/library-workbuddy-trust.test.cjs internal/gui/tests/skill-new-in-repo.test.cjs internal/gui/tests/skill-update-edited.test.cjs internal/gui/tests/skill-gone.test.cjs internal/gui/tests/skill-git-source.test.cjs internal/gui/tests/remove-found-skill.test.cjs internal/gui/tests/found-skill-pick-remove.test.cjs internal/gui/tests/library-loading.test.cjs internal/gui/tests/library-mcp-tools.test.cjs internal/gui/tests/library-mcp-tool-switch.test.cjs internal/gui/tests/library-hooks.test.cjs internal/gui/tests/library-subagents.test.cjs internal/gui/tests/library-mcp-health.test.cjs internal/gui/tests/library-mcp-health-wsl.test.cjs internal/gui/tests/mcp-signin-health.test.cjs internal/gui/tests/mcp-signin.test.cjs internal/gui/tests/mcp-editor-cancel.test.cjs internal/gui/tests/mcp-oauth-app.test.cjs internal/gui/tests/library-ime-scroll.test.cjs
