@@ -1,0 +1,154 @@
+name: Fork release
+
+on:
+  push:
+    tags: ['v*-ssh.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing personal release tag, e.g. v0.1.1998-ssh.2
+        required: true
+        type: string
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    if: github.repository == 'xinnan-zhu/magpie'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check update feed rejects missing or corrupted assets
+        run: python3 build/fork-feed-test.py
+      - name: Require a personal tag on main with passing Test CI
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-ssh\.[0-9]+$ ]]
+          SHA=$(git rev-parse "$TAG^{commit}")
+          git merge-base --is-ancestor "$SHA" origin/main
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?head_sha=$SHA&status=completed&per_page=100" > runs.json
+          export SHA
+          python3 - <<'PY'
+          import json, os
+          runs = json.load(open('runs.json'))['workflow_runs']
+          assert any(r['head_sha'] == os.environ['SHA'] and r['conclusion'] == 'success' for r in runs), 'Wait for a green Test run at the tagged commit, then rerun Fork release'
+          PY
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  mac:
+    needs: verify
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      CGO_ENABLED: '1'
+      CGO_CFLAGS: -mmacosx-version-min=12.0
+      CGO_LDFLAGS: -mmacosx-version-min=12.0
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build and ad-hoc sign Apple silicon app
+        shell: bash
+        run: |
+          set -euo pipefail
+          LD="-s -w -X main.version=$VERSION -X github.com/yetone/magpie/internal/update.feedURL=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          make app VERSION="$VERSION" LDFLAGS="$LD"
+          lipo -archs magpie.app/Contents/MacOS/magpie | grep -qx arm64
+          codesign --force --deep -s - magpie.app
+          codesign --verify --deep --strict magpie.app
+          mkdir -p dist
+          ditto -c -k --keepParent magpie.app dist/magpie-darwin-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-mac
+          path: dist/magpie-darwin-arm64.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  binaries:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Windows apps and Windows/Linux terminal binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          LD="-s -w -X main.version=$VERSION -X github.com/yetone/magpie/internal/update.feedURL=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          make release-windows release-cli VERSION="$VERSION" LDFLAGS="$LD" TARGETS="windows/amd64 windows/arm64 linux/amd64 linux/arm64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-binaries
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [verify, mac, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      SHA: ${{ needs.verify.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fork-*
+          merge-multiple: true
+          path: dist
+      - name: Describe and checksum the release
+        run: |
+          cp build/fork-release-notes.md notes.md
+          printf '\n\nSource: https://github.com/%s/commit/%s\n' "$GITHUB_REPOSITORY" "$SHA" >> notes.md
+          python3 build/fork-feed.py "$VERSION" dist notes.md
+      - name: Upload to a draft, verify every digest, then publish Latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft -q .isDraft > draft.txt 2>/dev/null; then
+            test "$(cat draft.txt)" = true || { echo 'A published release is never overwritten'; exit 1; }
+            gh release edit "$TAG" --notes-file notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --draft --title "magpie $TAG" --notes-file notes.md
+          fi
+          gh release view "$TAG" --json assets > assets.json
+          python3 build/fork-feed.py --verify dist assets.json
+          gh release edit "$TAG" --draft=false --latest
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name | { read -r actual; test "$actual" = "$TAG"; }

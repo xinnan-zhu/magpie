@@ -8,8 +8,9 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
+ARG UPDATE_FEED=
 RUN CGO_ENABLED=0 go build -tags nogui -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION}" -o /out/magpie . \
+      -ldflags "-s -w -X main.version=${VERSION} -X github.com/yetone/magpie/internal/update.feedURL=${UPDATE_FEED}" -o /out/magpie . \
     && mkdir -p /config/home /config/cache /config/data /config/state
 
 # Debian, not distroless: a subscription's CLI is installed with its

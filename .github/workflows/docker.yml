@@ -78,6 +78,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
+            UPDATE_FEED=${{ github.repository != 'yetone/magpie' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
           outputs: |
             type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true
           cache-from: type=gha,scope=${{ matrix.platform }}
