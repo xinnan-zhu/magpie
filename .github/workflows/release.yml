@@ -20,6 +20,9 @@ on:
 
 jobs:
   trigger-release:
+    # Fork releases are built and published by their owner, never dispatched
+    # to the official signing repository.
+    if: github.repository == 'yetone/magpie'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
