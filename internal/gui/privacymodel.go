@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/settings"
 )
 
 // privacyModelJSON is Settings → Privacy's local masking model: whether it
-// is on, the model masking uses (or would, turned on) with its own status
+// is on (masking.ModelWanted: the user's, or the default), the model masking uses (or would, turned on) with its own status
 // (downloaded, downloading, where it runs) and threshold (the one the
 // user set, else its default), and every model there is to pick, with
 // theirs.
 type privacyModelJSON struct {
 	On bool `json:"on"`
+	// Chosen says the user turned it on, not the default: only then is
+	// a request held back for it (masking.ModelOn)
+	Chosen bool `json:"chosen,omitempty"`
 	pii.Status
 	MinScore     float64      `json:"minScore"`
 	DefaultScore float64      `json:"defaultScore"`
@@ -27,8 +31,9 @@ var modelOf, models = pii.Of, pii.Models
 
 func privacyModelState() privacyModelJSON {
 	st := settings.Load()
-	m := modelOf(pii.Choose(st.RedactModelName, st.RedactModel))
-	out := privacyModelJSON{On: st.RedactModel, Status: m.Now(), MinScore: pii.Threshold(st.RedactModelScore, m), DefaultScore: m.MinScore()}
+	on := masking.ModelWanted(st)
+	m := modelOf(pii.Choose(st.RedactModelName, on))
+	out := privacyModelJSON{On: on, Chosen: st.RedactModel, Status: m.Now(), MinScore: pii.Threshold(st.RedactModelScore, m), DefaultScore: m.MinScore()}
 	for _, m := range models() {
 		out.Models = append(out.Models, m.Now())
 	}
@@ -64,14 +69,15 @@ func privacyModelRoutes(mux *http.ServeMux) {
 			return
 		}
 		st := settings.Load()
-		was := pii.Choose(st.RedactModelName, st.RedactModel)
+		on := masking.ModelWanted(st)
+		was := pii.Choose(st.RedactModelName, on)
 		var err error
 		switch in.Do {
 		case "pick":
 			switch {
 			case in.Model == "":
 				err = fmt.Errorf("pick needs a model")
-			case st.RedactModel:
+			case on:
 				err = turnOn(in.Model, was)
 			default:
 				err = settings.SetRedactModelName(in.Model)
@@ -103,6 +109,11 @@ func privacyModelRoutes(mux *http.ServeMux) {
 		case "cancel":
 			for _, m := range models() {
 				m.Cancel()
+			}
+			// the download on by default, cancelled, is the model
+			// turned off: it would start again on the next request
+			if on && !st.RedactModel && !modelOf(was).Installed() {
+				err = settings.SetRedactModel(false)
 			}
 		case "remove":
 			if err = settings.SetRedactModel(false); err == nil {

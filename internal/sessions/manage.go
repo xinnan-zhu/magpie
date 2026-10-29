@@ -49,6 +49,10 @@ type Managed struct {
 	Messages  int   `json:"messages"`
 	Files     int   `json:"files"`
 	Deletable bool  `json:"deletable"`
+	// Pending: a file of it is still being read for the first time, and
+	// what it spent and its messages aren't counted yet (the Sessions page
+	// answers before such a read, manage_quick.go)
+	Pending bool `json:"pending,omitempty"`
 	// Codex: the provider the session was made with, and the one its Codex
 	// uses now, whose sessions alone its history lists (#887)
 	Provider     string `json:"provider,omitempty"`
@@ -167,12 +171,22 @@ func Manage(native map[string]bool, pick func([]AgentCount, map[string]map[strin
 	loadCache()
 	defer useDBs()()
 	all := allFiles()
-	v := ManageView{Agents: agentCounts(all), Native: nativeIDs(native, all)}
+	v := ManageView{Agents: agentCounts(all), Native: nativeIDsWith(native, all, true)}
 	v.Agent = pick(v.Agents, v.Native)
 	if v.Agent != "" {
-		v.Sessions = listAgent(v.Agent, all)
+		v.Sessions = listAgentWith(v.Agent, all, true)
 	}
 	return v
+}
+
+// readFor brings want's parses up to date: all of them, or, quick, as
+// quickRead does, with pending the paths still being read.
+func readFor(want, all []file, quick bool) (pending map[string]bool, done func()) {
+	if !quick {
+		refresh(want, all)
+		return nil, func() {}
+	}
+	return quickRead(want, all)
 }
 
 // idInFile says which agents' session ids are read from inside the
@@ -186,6 +200,10 @@ func idInFile(agent string) bool {
 }
 
 func nativeIDs(agents map[string]bool, all []file) map[string]map[string]bool {
+	return nativeIDsWith(agents, all, false)
+}
+
+func nativeIDsWith(agents map[string]bool, all []file, quick bool) map[string]map[string]bool {
 	groups := byKey(all, func(f *file) bool { return agents[f.agent] })
 	var want []file
 	for _, f := range all {
@@ -196,7 +214,8 @@ func nativeIDs(agents map[string]bool, all []file) map[string]map[string]bool {
 			want = append(want, f)
 		}
 	}
-	refresh(want, all)
+	_, done := readFor(want, all, quick)
+	defer done()
 	out := map[string]map[string]bool{}
 	for a := range agents {
 		out[a] = map[string]bool{}
@@ -208,6 +227,10 @@ func nativeIDs(agents map[string]bool, all []file) map[string]map[string]bool {
 }
 
 func listAgent(agent string, all []file) []Managed {
+	return listAgentWith(agent, all, false)
+}
+
+func listAgentWith(agent string, all []file, quick bool) []Managed {
 	groups := byKey(all, func(f *file) bool { return f.agent == agent })
 	var mine []file
 	for _, f := range all {
@@ -215,7 +238,8 @@ func listAgent(agent string, all []file) []Managed {
 			mine = append(mine, f)
 		}
 	}
-	refresh(mine, all)
+	pending, done := readFor(mine, all, quick)
+	defer done()
 	identities := map[string]CodexIdentity(nil)
 	taskTitles := map[codexTaskTitle]string(nil)
 	if agent == "codex" {
@@ -239,6 +263,7 @@ func listAgent(agent string, all []file) []Managed {
 		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent) && !s.ReadOnly}
 		for _, f := range fs {
 			m.Size += f.size
+			m.Pending = m.Pending || pending[f.path]
 			if st := cache[f.path]; st != nil && f.main {
 				for _, d := range st.Days.all() {
 					m.Messages += d.Prompts + d.Replies
@@ -289,6 +314,9 @@ type Trashed struct {
 	// Gateway: a session seen only through magpie's gateway, whose items
 	// are the conversation text magpie recorded of it (gateway_delete.go)
 	Gateway bool `json:"gateway,omitempty"`
+	// CodexCatalog: a Codex thread's rows in the Codex app's catalog,
+	// taken out with it and put back on Restore (codex_catalog.go)
+	CodexCatalog []codexCatalogRow `json:"codex_catalog,omitempty"`
 }
 
 // moved is one file or folder of a session moved to the trash: where it
@@ -402,6 +430,18 @@ func Delete(agent, id string) (Trashed, error) {
 	}
 	saveCache()
 	wslForget(fs)
+	if agent == "codex" {
+		// the Codex app's list of it, which it keeps apart from the files
+		var homes []string
+		for _, p := range paths {
+			homes = append(homes, codexHomeOf(p))
+		}
+		tidyCodexCatalog(homes)
+		if b, err := os.ReadFile(filepath.Join(dir, manifest)); err == nil {
+			json.Unmarshal(b, &t)
+		}
+		t.Key = agent + "/" + name
+	}
 	return t, nil
 }
 
@@ -710,6 +750,11 @@ func Restore(key string) (Trashed, error) {
 			}
 			return Trashed{}, err
 		}
+	}
+	// the Codex app lists it again: it wouldn't take in a thread that old
+	// by itself
+	if t.Agent == "codex" && len(t.CodexCatalog) > 0 {
+		restoreCodexCatalog(t.CodexCatalog)
 	}
 	os.RemoveAll(dir)
 	wslRelistNow(t.Items)

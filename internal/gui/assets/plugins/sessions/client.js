@@ -114,8 +114,29 @@ magpie.plugin("sessions", (ctx) => {
   const UNDO = "M5.5 3.5 2.5 6.5l3 3M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7";
   const MOVE = "M2.5 8h10M9.5 5l3 3-3 3";
 
+  // fillIn asks again, while rows are still pending (a file of theirs not
+  // read whole yet: their first lines are what shows), for what the read
+  // behind the answer has found; only the list is drawn again, so the
+  // filter keeps its focus and an open menu stays.
+  let fillT = 0;
+  function fillSoon() {
+    clearTimeout(fillT);
+    if (!data?.sessions?.some((s) => s.pending)) return;
+    const n = loading, was = data.agent;
+    fillT = setTimeout(async () => {
+      if (n !== loading || view !== "sessions") return;
+      let d;
+      try { d = await api("sessions/manage?agent=" + encodeURIComponent(was)); } catch { return fillSoon(); }
+      if (n !== loading || !data || data.agent !== was || d?.agent !== was) return;
+      data = { ...data, ...d, agents: d?.agents || [], sessions: (d?.sessions || []).map((s) => ({ ...s, models: s.models || [] })), trash: d?.trash || [], agent: was };
+      if (view === "sessions" && !trashOn) redrawList(); // the pages shown stay
+      fillSoon();
+    }, 1500);
+  }
+
   async function load(name) {
     const n = ++loading;
+    clearTimeout(fillT);
     if (!data) draw();
     try {
       const d = await api("sessions/manage?agent=" + encodeURIComponent(name ?? agent));
@@ -131,6 +152,7 @@ magpie.plugin("sessions", (ctx) => {
       failed = e.message;
     }
     if (view === "sessions") draw();
+    if (n === loading) fillSoon();
   }
 
   // reveal: the Sessions page, from the Usage page's list (#752):

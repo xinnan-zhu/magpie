@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,10 +42,43 @@ func TestPluginStreamsPastTheBudgetWait(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	s := New()
-	gw := httptest.NewServer(s.Handler())
+	// macOS queues at most 128 connections for a listener to accept
+	// (kern.ipc.somaxconn) and resets a dial past that (#3946): a dial
+	// takes a place in pending until the gateway accepts its connection,
+	// so no more than 64 of the 192 are dialing or queued at once. Giving
+	// a place back never waits: the accept runs in the server's accept
+	// loop under httptest's lock, and a dial that failed after its
+	// handshake may have been accepted already
+	pending := make(chan struct{}, 64)
+	free := func() {
+		select {
+		case <-pending:
+		default:
+		}
+	}
+	gw := httptest.NewUnstartedServer(s.Handler())
+	gw.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			free()
+		}
+	}
+	gw.Start()
 	t.Cleanup(gw.Close)
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy, tr.MaxIdleConnsPerHost = nil, n
+	dial := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		select {
+		case pending <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		c, err := dial(ctx, network, addr)
+		if err != nil {
+			free()
+		}
+		return c, err
+	}
 	t.Cleanup(tr.CloseIdleConnections)
 	client := &http.Client{Transport: tr, Timeout: 2 * time.Minute}
 

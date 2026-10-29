@@ -684,16 +684,52 @@ func codexListed(shown []Entry, members func(id string) []Member, own bool) []ca
 	seen := described()
 	s := settings.Load()
 	find := func(id string) (Group, []Member, bool) { return Group{}, members(id), true }
+	listed := func(e Entry) bool { return own || !CodexOwn(e) }
+	apart := codexApart(shown, labels, listed)
 	for i, e := range shown {
-		if CodexOwn(e) && !own {
+		if !listed(e) {
 			continue
 		}
-		m := catalog.Model{ID: e.ID, Name: labels[i], Efforts: e.Efforts, Images: e.Images || seen, Context: e.Context, AgentsV2: e.AgentsV2, Codex: e.Codex}
+		m := catalog.Model{ID: e.ID, Name: labels[i], Efforts: e.Efforts, Images: e.Images || seen, Context: e.Context, AgentsV2: e.AgentsV2, Codex: e.Codex, Apart: apart[i]}
 		m.Compact = CompactFor(s, e, find)
 		CodexTiers(&m, e, members)
 		ms = append(ms, m)
 	}
 	return ms
+}
+
+// codexApart is, for each of shown that is listed, what tells it from
+// another listed entry its label (labels) would call the same in Codex's
+// picker (catalog.Model.Apart): its provider's id, or its own id where
+// that doesn't tell them apart (a routing group, or two of one provider).
+// "" for every other entry, whose picker name stays as it was.
+func codexApart(shown []Entry, labels []string, listed func(Entry) bool) []string {
+	out := make([]string, len(shown))
+	same := map[string][]int{}
+	for i, e := range shown {
+		if listed(e) {
+			k := strings.ToLower(labels[i])
+			same[k] = append(same[k], i)
+		}
+	}
+	for _, is := range same {
+		if len(is) < 2 {
+			continue
+		}
+		ids := map[string]int{}
+		for _, i := range is {
+			ids[strings.ToLower(shown[i].Provider.ID)]++
+		}
+		for _, i := range is {
+			e := shown[i]
+			if e.Group == "" && e.Provider.ID != "" && ids[strings.ToLower(e.Provider.ID)] == 1 {
+				out[i] = e.Provider.ID
+			} else {
+				out[i] = e.ID
+			}
+		}
+	}
+	return out
 }
 
 // CodexTiers sets on m what Codex is offered on e's service tiers

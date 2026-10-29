@@ -65,9 +65,11 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      # internal/gateway takes 450-600s on macOS runners, and go test's
+      # default 10m timed it out in 3 of 8 finished main runs (#2108).
       - name: Test
         if: runner.os != 'Windows'
-        run: go test -tags "${{ steps.tags.outputs.tags }}" ./...
+        run: go test -timeout 30m -tags "${{ steps.tags.outputs.tags }}" ./...
 
       # Windows skips the Test step above, so the two plugin stderr tests run
       # here. The end-to-end one needs bun on PATH; without it it skips.

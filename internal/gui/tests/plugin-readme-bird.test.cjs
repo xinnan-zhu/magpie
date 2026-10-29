@@ -2,7 +2,8 @@
 // A plugin's README loads under magpie's bird: it drops onto the skeleton's
 // lines, each one bending under it as it bounces down them. When the README
 // comes the bird flies off and the box goes. With reduced motion the lines
-// stay straight and the bird sits still on the first.
+// stay straight and the bird sits still on the first. With Settings'
+// Loading bird off the lines stay straight and no bird comes.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -14,13 +15,13 @@ const listings = [{ package: "opencode-copilot-auth", name: "GitHub Copilot", ic
   summary: { en: "Your GitHub Copilot plan." }, npm: { version: "0.0.9", weekly: 48213, publisher: "thdxr" } }];
 const readme = (n) => ["# opencode-copilot-auth", ...Array.from({ length: n }, (_, i) => "\nParagraph " + i + ".")].join("\n");
 
-function server(reply) {
+function server(reply, noBird) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"en",theme:"light",web:false};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"en",theme:"light",web:false${noBird ? ",noBird:true" : ""}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang: "en", theme: "light" } });
+    if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang: "en", theme: "light", ...(noBird ? { noBird: true } : {}) } });
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true }, plugins: [] });
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [] });
     const state = { bun: true, bunVersion: "1.3.0", plugins: [] };
@@ -47,14 +48,14 @@ const look = (page) => page.evaluate(() => {
 // how far a line's middle bends below its ends
 const bend = (d) => { const n = (d || "").match(/-?[\d.]+/g)?.map(Number) || []; return n.length < 14 ? 0 : n[7] - n[1]; };
 
-async function open(browser, reduced) {
+async function open(browser, reduced, noBird) {
   const page = await (await browser.newContext({ viewport: { width: 980, height: 820 }, reducedMotion: reduced ? "reduce" : "no-preference" })).newPage();
   page.setDefaultTimeout(5000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   let release;
   const next = new Promise((r) => { release = r; });
-  await page.route("**/*", server(() => next));
+  await page.route("**/*", server(() => next, noBird));
   await page.goto("http://magpie.test/?view=plugins");
   await page.locator("#view-plugins .pm-find input").fill("copilot");
   const card = page.locator('.pm-card[data-pkg="opencode-copilot-auth"]');
@@ -128,6 +129,23 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.deepEqual(a, b, "nothing moves");
     for (const d of a.paths) assert.equal(bend(d), 0, `straight: ${d}`);
     assert.match(a.bird, /translate\(/);
+    release({ readme: readme(3), updated: "2026-09-01T00:00:00Z" });
+    await page.locator("#modal .pm-md p", { hasText: "Paragraph 2." }).waitFor();
+    assert.equal(await page.locator("#modal .pm-bounce").count(), 0, "the box goes at once");
+    assert.deepEqual(errors, []);
+  });
+
+  test(engine + ": with Settings' Loading bird off the lines stay straight and no bird comes", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const { page, errors, release } = await open(browser, false, true);
+    await page.waitForFunction(() => document.querySelector("#modal .pm-bounce path").getAttribute("d"));
+    const read = () => page.evaluate(() => [...document.querySelectorAll("#modal .pm-bounce path")].map((p) => p.getAttribute("d")));
+    const a = await read();
+    await page.waitForTimeout(400);
+    assert.deepEqual(await read(), a, "nothing moves");
+    for (const d of a) assert.equal(bend(d), 0, `straight: ${d}`);
+    assert.equal(await page.locator(".sk-bird").count(), 0, "no bird");
     release({ readme: readme(3), updated: "2026-09-01T00:00:00Z" });
     await page.locator("#modal .pm-md p", { hasText: "Paragraph 2." }).waitFor();
     assert.equal(await page.locator("#modal .pm-bounce").count(), 0, "the box goes at once");

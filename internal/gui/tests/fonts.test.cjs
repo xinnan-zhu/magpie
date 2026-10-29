@@ -65,6 +65,7 @@ async function open(browser, lang = "en", options = {}) {
     };
     requestAnimationFrame(look);
   });
+  if (options.init) await page.addInitScript(options.init, options.arg);
   await watchSettingsReads(page);
   await page.goto("http://magpie.test/?view=settings&tab=general");
   await settingsDrawn(page); // rows found are the ones that stay (#1659)
@@ -363,6 +364,110 @@ for (const [engine, runtime] of engines) {
         assert.deepEqual(errors, []);
         await close();
       }
+    } finally { await browser.close(); }
+  });
+
+  // Norcleeh (magpie in Docker, its web GUI): the tab listed the server's
+  // fonts, the container's, never the ones on his own computer. Where the
+  // browser has the Local Font Access API, the press that opens a family
+  // menu asks for them, once; they are offered with their real styles.
+  // queryLocalFonts is stubbed in both engines (a real one needs a press,
+  // a permission prompt and a secure origin).
+  const ownFonts = [
+    { family: "Norcleeh Sans", fullName: "Norcleeh Sans Regular", postscriptName: "NorcleehSans-Regular", style: "Regular" },
+    { family: "Norcleeh Sans", fullName: "Norcleeh Sans Bold Italic", postscriptName: "NorcleehSans-BoldItalic", style: "Bold Italic" },
+    { family: "Norcleeh Sans", fullName: "Norcleeh Sans SemiBold Condensed", postscriptName: "NorcleehSans-SemiBoldCond", style: "SemiBold Condensed" },
+    { family: "Norcleeh Mono", fullName: "Norcleeh Mono Regular", postscriptName: "NorcleehMono-Regular", style: "Regular" },
+  ];
+  const localFonts = (fonts) => {
+    window.__asked = [];
+    navigator.permissions.query = async () => ({ state: "prompt" });
+    window.queryLocalFonts = async () => {
+      window.__asked.push(navigator.userActivation ? navigator.userActivation.isActive : "unknown");
+      return fonts;
+    };
+  };
+  for (const lang of ["en", "zh"]) for (const width of [1000, 440]) test(`${engine} ${lang} ${width}px: a browser tab lists the fonts of the computer it runs on`, async () => {
+    const browser = await runtime.launch();
+    try {
+      const { page, api, errors, close } = await open(browser, lang, { web: true, viewport: { width, height: 820 }, list: [], init: localFonts, arg: ownFonts });
+      assert.deepEqual(await page.evaluate(() => window.__asked), [], "nothing is asked before the menu opens (it needs a press)");
+      await page.locator("#uiFontRow .font-family").click();
+      await page.locator(".font-menu").waitFor();
+      const asked = await page.evaluate(() => window.__asked);
+      assert.equal(asked.length, 1, "the press that opens the menu asks once");
+      if (engine === "chromium") assert.equal(asked[0], true, "asked within the press");
+      const names = await page.locator(".font-menu .pm-item:not([hidden]) .pm-name").allTextContents();
+      assert(names.includes("Norcleeh Sans") && names.includes("Norcleeh Mono"), "this computer's families are offered: " + names);
+      const box = await page.locator(".font-menu").boundingBox();
+      assert(box.x >= 0 && box.x + box.width <= width, "the menu fits the window: " + JSON.stringify(box));
+      await page.locator(".font-menu .sc-q").fill("Norcleeh Sans");
+      await page.locator(".font-menu .pm-item").filter({ has: page.locator(".pm-name", { hasText: "Norcleeh Sans" }) }).first().click();
+      assert.match((await css(page, "body")).family, /^"?Norcleeh Sans/);
+      await page.locator("#uiFontRow .font-style").click();
+      const styles = await page.locator(".font-menu .pm-item .pm-name").allTextContents();
+      assert.deepEqual(styles, ["Regular", "SemiBold Condensed", "Bold Italic"], "its real styles, by weight");
+      await page.keyboard.press("Escape");
+      await style(page, "uiFontRow", "SemiBold Condensed");
+      const look = await css(page, "body");
+      assert.equal(look.weight, "600");
+      assert.equal(look.stretch, "75%");
+      await style(page, "uiFontRow", "Bold Italic");
+      assert.equal((await css(page, "body")).style, "italic");
+      await page.locator("#codeFontRow .font-family").click();
+      await page.locator(".font-menu").waitFor();
+      assert.equal((await page.evaluate(() => window.__asked)).length, 1, "asked once a page");
+      await page.keyboard.press("Escape");
+      assert.equal(api.posts.filter(p => "uiFont" in p || "codeFont" in p).length, 0, "the browser's choice isn't sent as the app's");
+      assert.equal(await page.locator("select").count(), 0);
+      assert.deepEqual(errors, []);
+      await close();
+    } finally { await browser.close(); }
+  });
+
+  // Where there is no such API (Safari, Firefox, a plain-http address) or
+  // the user refused it, a family is typed into the menu's search: it is
+  // taken when this browser draws it, and kept across a reload though the
+  // server has no such font.
+  for (const lang of ["en", "zh"]) for (const [how, width] of [["missing", 1000], ["refused", 440]]) test(`${engine} ${lang} ${width}px: a browser tab takes a typed font when the API is ${how}`, async () => {
+    const browser = await runtime.launch();
+    try {
+      const init = how === "missing" ? () => { delete window.queryLocalFonts; }
+        : () => { window.queryLocalFonts = async () => { throw new DOMException("refused", "NotAllowedError"); }; };
+      const { page, api, errors, close } = await open(browser, lang, { web: true, viewport: { width, height: 820 }, list: [], init });
+      const real = await page.evaluate(() => ["Georgia", "Courier New", "Times New Roman", "DejaVu Serif", "Liberation Serif"].find(n => {
+        const ctx = document.createElement("canvas").getContext("2d"), w = f => (ctx.font = "72px " + f, ctx.measureText("mmmlli WwQ@ 0123").width);
+        return ["monospace", "serif"].some(b => w(`"${n}",${b}`) !== w(b));
+      }));
+      assert(real, "the test machine draws one of the families tried");
+      await page.locator("#uiFontRow .font-family").click();
+      const q = page.locator(".font-menu .sc-q");
+      assert.equal(await q.getAttribute("placeholder"), lang === "zh" ? "搜索或输入字体名称…" : "Search or type a font name…");
+      await q.fill("No Such Family Here");
+      const typed = page.locator(".font-menu .typed-font");
+      assert.equal(await typed.isVisible(), true, "a typed family is answered");
+      assert.equal(await typed.isDisabled(), true, "one this browser doesn't draw can't be chosen");
+      assert.equal(await typed.locator(".pm-note").textContent(), lang === "zh" ? "这个浏览器找不到这款字体" : "This browser can't find this font");
+      await q.fill(real);
+      assert.equal(await typed.isDisabled(), false);
+      assert.equal(await typed.locator(".pm-name").textContent(), lang === "zh" ? `使用“${real}”` : `Use “${real}”`);
+      await q.press("Enter");
+      await page.locator(".font-menu").waitFor({ state: "detached" });
+      assert.match((await css(page, "body")).family, new RegExp("^\"?" + real));
+      assert.equal(await page.locator("#uiFontRow .font-family span").textContent(), real);
+      await style(page, "uiFontRow", "Bold");
+      assert.equal((await css(page, "body")).weight, "700");
+      assert.equal(api.posts.filter(p => "uiFont" in p || "codeFont" in p).length, 0, "the browser's choice isn't sent as the app's");
+      await page.reload();
+      await page.locator("#uiFontRow .font-family").waitFor();
+      await page.waitForFunction(() => fontList !== null && !fontFlight);
+      assert.match((await css(page, "body")).family, new RegExp("^\"?" + real), "kept across a reload, though the server lists no such font");
+      assert.equal((await css(page, "body")).weight, "700");
+      assert.equal(await page.locator("#uiFontRow .font-family span").textContent(), real);
+      assert.equal(await page.locator("#uiFontRow .font-note").isVisible(), false, "not called unavailable");
+      assert.equal(await page.locator("select").count(), 0);
+      assert.deepEqual(errors, []);
+      await close();
     } finally { await browser.close(); }
   });
 

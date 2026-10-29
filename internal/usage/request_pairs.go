@@ -18,7 +18,7 @@ type pairMemo struct {
 	// a chunk without a serial (the probes') is named by its rows instead
 	serials       []uint64
 	skip, matched []serialRef
-	actors        map[uint64][]string
+	actors        map[uint64]codexActors
 	compactions   map[uint64]map[int]*bool
 }
 
@@ -85,9 +85,9 @@ func memoOf(ps *pairedRows, serials []uint64, originals []*rowChunk) *pairMemo {
 		}
 		named[c] = serials[k]
 		k++
-		if !slices.Equal(c.codexActors, originals[i].codexActors) {
+		if !c.codexActors.equal(originals[i].codexActors) {
 			if m.actors == nil {
-				m.actors = map[uint64][]string{}
+				m.actors = map[uint64]codexActors{}
 			}
 			m.actors[serials[k-1]] = c.codexActors
 		}

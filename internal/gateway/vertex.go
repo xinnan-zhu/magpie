@@ -16,6 +16,12 @@ import (
 // at all on 2.5, is a 400 (vertexEffort, vertexThinking). A call's thought
 // signature goes back as Vertex AI gave it, as on every Gemini path
 // (gemini_signature.go): a call made with none on a step it signed is a 400.
+//
+// Its partner models (provider.VertexPartner: deepseek-ai/…, zai-org/…,
+// openai/gpt-oss-…) are not Gemini: Google serves them on its
+// OpenAI-compatible chat completions at the project (Base(Chat)), under
+// the same token, and the gateway asks them there as it asks any chat
+// completions vendor. Nothing in this file is done to them.
 
 // buildVertex is a streamGenerateContent body for Vertex AI, which names the
 // model in its path and has none in here.

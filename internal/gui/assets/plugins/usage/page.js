@@ -125,7 +125,10 @@ let usageRead = 0;
 async function loadUsage(asked) {
   renderUsageTab();
   renderUsageEvery(); // the refresh's tooltip says what it reads on this tab
-  if (asked) quotasOpened();
+  // only the Overview shows the allowances: the page opened on another
+  // tab asks no vendor, nor reads their history, beside its own read and
+  // the page's way in (#4064)
+  if (asked && usageTab === "usage") quotasOpened();
   if (usageTab === "sessions") return loadSessions();
   if (usageTab === "requests") return loadLedger();
   if (usageTab === "context") return window.loadContext?.();
@@ -321,6 +324,7 @@ function renderUsageLoading() {
   // still there while the period loads (#809, Hu9956: 用量界面红框这行会延迟几秒才会出现)
   for (const h of $$("#view-usage .row-head:not(#quotaHead, .plugin-panel > .row-head)")) h.hidden = true;
   $("#usageNote").textContent = "";
+  $("#usageClear").hidden = true;
 }
 
 // costHead is the Usage head's sum: the cost at effective prices, or, when
@@ -405,7 +409,7 @@ function quotaWho(q) {
     out.push(s);
   } else if (q.seat) out[0].title += "\n" + t("The same seat as the key plan {name}, shown once, on this account's card", { name: q.seat });
   if (q.sharedKeys) out.push(sharedKeysNote(q));
-  if (q.user || q.alias) out.push(hideAccounts.eye(q.user || q.alias));
+  if (q.user || q.alias) out.push(hideAccounts.eye(q.user || q.alias, q.provider));
   return out;
 }
 
@@ -539,6 +543,7 @@ function renderUsage() {
     const none = noCallsIn(period);
     stats.append(el("div", "none", t(none) + " " + t("Point an agent at a catalog model and use it; every call through the gateway is counted here.")));
     $("#usageNote").textContent = "";
+    $("#usageClear").hidden = true;
     return;
   }
   stats.classList.remove("empty");
@@ -697,13 +702,62 @@ function renderUsage() {
     b.onclick = (e) => { e.stopPropagation(); hideUsageAgent(g.id, false); };
     r.append(b);
   });
-  list("usageModels", u.models);
+  // a model's usage cleared (CrazyMouse_TT on X: a local model deployed
+  // again, its requests, speed and cache wanted from nothing)
+  list("usageModels", u.models, (r, g) => {
+    if (!g.model) return;
+    r.classList.add("acts");
+    const b = el("button", "icon us-more");
+    b.type = "button";
+    b.setAttribute("aria-haspopup", "menu");
+    b.setAttribute("aria-label", t("Actions for {name}", { name: g.name || g.model }));
+    b.append(svg(DOTS, 14, 2.2));
+    const menu = () => {
+      const again = agentMenu?.anchor === b;
+      closeAgentMenu();
+      if (again) return;
+      openRowMenu(b, [{ name: "Clear usage…", icon: USAGE_CLEAR, run: () => clearUsage(g) }]);
+    };
+    b.onclick = (e) => { e.stopPropagation(); menu(); };
+    r.oncontextmenu = (e) => { e.preventDefault(); menu(); };
+    r.querySelector(".share").after(b);
+  });
   list("usageAccounts", u.accounts || []);
   list("usageKeys", u.callerKeys || []);
   $("#usageNote").textContent = t("Counted from the providers' own usage reports on every call through the gateway · {path}", { path: u.path });
+  const clear = $("#usageClear");
+  clear.hidden = false;
+  clear.onclick = () => clearUsage();
   // the account cards say how many of this period's requests were
   // magpie's own (ownLine), which they could only once the summary came
   if (quotas && (u.accounts?.some((g) => g.own?.calls) || $("#subscriptionUsage .quota-own"))) renderQuotas();
+}
+
+// clearUsage clears the Usage page's figures, after the reader confirms:
+// one model's (g, from the Models list) or everything's (no g). The calls
+// up to now stop being counted on the usage pages, here and on the
+// computers this one syncs with; the request log keeps them, so a key's
+// spending limit and the allowances still count them
+// (settings.UsageCleared).
+const USAGE_CLEAR = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v3.5M9 7v3.5";
+async function clearUsage(g) {
+  const ok = await confirmAction(
+    g ? t("Clear the usage of {model}?", { model: g.name || g.model }) : t("Clear all usage?"),
+    (g
+      ? t("Every call to {model} at {provider} so far stops being counted on the Usage page: its requests, tokens, cost, speed and cache, in every period, on this computer and those it syncs with.", { model: g.name || g.model, provider: (g.sub || g.provider || "").split(" · ")[0] })
+      : t("Every call so far stops being counted on the Usage page: the requests, tokens, cost, speed and cache of every agent and model, in every period, on this computer and those it syncs with."))
+      + " " + t("Gateway keys' spending limits and the allowances still count these calls. This can't be undone."),
+    t("Clear"),
+  );
+  if (!ok) return;
+  try {
+    await api("usage/clear", g ? { provider: g.provider || "", model: g.model } : {});
+    status(g ? t("The usage of {model} is cleared", { model: g.name || g.model }) : t("All usage is cleared"), "ok");
+    ledger = null;
+    await loadUsage();
+  } catch (e) {
+    status(e.message, "err");
+  }
 }
 
 // countable is whether the Usage page's Agents list offers to count a
@@ -2468,8 +2522,7 @@ function renderSessionsLoading() {
   view.setAttribute("aria-busy", "true");
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
   renderSessRange(true);
-  $("#sessAgent").replaceChildren();
-  $("#sessModel").hidden = $("#sessFolder").hidden = true;
+  $("#sessAgent").hidden = $("#sessModel").hidden = $("#sessFolder").hidden = true;
   $("#sessChart").hidden = true;
   $("#sessGrid").hidden = true;
   $("#sessListHead").hidden = true;
@@ -2566,7 +2619,7 @@ function sessIndexHero() {
   bar.append(fill);
   hero.append(words, field, bar);
 
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduced = calm();
   let frac = 0, shown = 0, known = false, tipAt = Date.now(), tipI = 0, rate = 0, last = null;
   let done = false;
   hero.update = (p) => {
@@ -2748,35 +2801,11 @@ function renderSessions() {
   const rows = st.days.flatMap((d) => d.usage.map((u) => ({ ...u, date: d.date })));
   const acts = st.days.flatMap((d) => d.active.map((a) => ({ ...a, date: d.date })));
 
-  // one segment per agent that has sessions, or usage in the range
+  // the agent filter is a menu, as the model and folder ones beside it: a
+  // strip of a segment per agent ran past the window with a dozen of them
+  // in range, and scrolled sideways to reach the last
   const agents = [...new Map([...all.map((s) => [s.agent, s.name]), ...Object.entries(st.agents || {})]).entries()];
   if (sessAgent !== "all" && !agents.some(([id]) => id === sessAgent)) sessAgent = "all";
-  const seg = $("#sessAgent");
-  seg.hidden = agents.length < 2;
-  const opts = [["all", t("All")], ...agents];
-  // the same agents keep their buttons: drawn anew, a strip with more than
-  // fit (#929) would lose where it was scrolled to (WebKit)
-  const was = [...seg.querySelectorAll(":scope > .opt")];
-  if (was.length !== opts.length || was.some((b, i) => b.dataset.agent !== opts[i][0] || b.textContent !== opts[i][1])) {
-    seg.replaceChildren();
-    for (const [id, name] of opts) {
-      const b = el("button", "opt", name);
-      b.dataset.agent = id;
-      b.onclick = () => { sessAgent = id; renderSessions(); };
-      seg.append(b);
-    }
-  }
-  for (const b of seg.querySelectorAll(":scope > .opt")) {
-    b.classList.toggle("on", b.dataset.agent === sessAgent);
-    b.setAttribute("aria-pressed", String(b.dataset.agent === sessAgent));
-  }
-  // and the agent picked is brought into the strip, the page left where it is
-  const picked = seg.querySelector(":scope > .on");
-  if (picked && seg.scrollWidth > seg.clientWidth) {
-    if (picked.offsetLeft < seg.scrollLeft) seg.scrollLeft = picked.offsetLeft;
-    else if (picked.offsetLeft + picked.offsetWidth > seg.scrollLeft + seg.clientWidth) seg.scrollLeft = picked.offsetLeft + picked.offsetWidth - seg.clientWidth;
-  }
-  slide(seg, "sessAgent");
 
   // the model and folder filters offer what the range has, under the other filters
   const byAgent = (x) => sessAgent === "all" || x.agent === sessAgent;
@@ -2789,6 +2818,10 @@ function renderSessions() {
   };
   const models = spent(rows.filter((r) => byAgent(r) && byFolder(r)), "model").map(([v, n]) => ({ v, name: v, note: t("{n} tokens", { n: fmtN(n) }) }));
   const folders = spent(rows.filter((r) => byAgent(r) && byModel(r)), "cwd").map(([v, n]) => ({ v, name: baseName(v), note: v + " · " + t("{n} tokens", { n: fmtN(n) }) }));
+  const agentSpent = new Map(spent(rows.filter((r) => byModel(r) && byFolder(r)), "agent"));
+  const agentOpts = agents.map(([v, name]) => ({ v, name: name || v, note: agentSpent.has(v) ? t("{n} tokens", { n: fmtN(agentSpent.get(v)) }) : "" }))
+    .sort((a, b) => (agentSpent.get(b.v) || 0) - (agentSpent.get(a.v) || 0));
+  sessPick($("#sessAgent"), "All agents", sessAgent === "all" ? "" : sessAgent, agentOpts, "Agent", (v) => { sessAgent = v || "all"; renderSessions(); });
   sessPick($("#sessModel"), "All models", sessModel, models, "Model", (v) => { sessModel = v; renderSessions(); });
   sessPick($("#sessFolder"), "All folders", sessFolder, folders, "Folder", (v) => { sessFolder = v; renderSessions(); });
 

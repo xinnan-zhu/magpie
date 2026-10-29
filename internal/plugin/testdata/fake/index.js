@@ -184,7 +184,11 @@ export const FakePlugin = async ({ client }) => ({
         }),
       },
     ],
-    loader: async (getAuth, provider) => ({
+    loader: async (getAuth, provider) => {
+      // $FAKE_LOAD_WAIT: the loader takes that many ms (a sign-in renewed
+      // on a slow line), as a cold host's first request waits for it
+      if (process.env.FAKE_LOAD_WAIT) await new Promise((r) => setTimeout(r, Number(process.env.FAKE_LOAD_WAIT)))
+      return {
       apiKey: "dummy",
       baseURL: process.env.FAKE_BASE,
       async fetch(url, init) {
@@ -206,13 +210,26 @@ export const FakePlugin = async ({ client }) => ({
         // where magpie said the agent works, as the plugin read it; its own
         // headers go on too, as a plugin that sends on what it got sends
         // them, for the host to take off
-        for (const k of ["x-magpie-work-dir", "x-magpie-work-git"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        // $FAKE_QUEUE: that model is queued at the vendor, as Qoder's free
+        // models are: waited out (here until magpie gives up) unless magpie
+        // said it needn't be, then said at once with the queue's 503
+        if (process.env.FAKE_QUEUE && typeof init.body === "string" && JSON.parse(init.body).model === process.env.FAKE_QUEUE) {
+          if (h.get("x-magpie-fallback") === "1") {
+            return new Response(JSON.stringify({ error: { message: `FakeCo queued the request for ${process.env.FAKE_QUEUE}; try again in 30s`, type: "queued" } }), { status: 503, headers: { "content-type": "application/json", "retry-after": "30" } })
+          }
+          await new Promise((_, no) => {
+            const t = setTimeout(() => no(new Error("FakeCo's queue gave up")), 300e3)
+            init.signal?.addEventListener("abort", () => (clearTimeout(t), no(init.signal.reason)))
+          })
+        }
         // $FAKE_H2: the request goes on node:http2 to that origin, as
         // Cursor's plugin runs its chats
         if (process.env.FAKE_H2) return h2(process.env.FAKE_H2, new URL(url).pathname)
         return fetch(url, { ...init, headers: h })
       },
-    }),
+    }
+    },
     // magpie's: the account's allowance; "full@fake" has used its five
     // hours, which count only fake-claude
     usage: async (getAuth) => {

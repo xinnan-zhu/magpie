@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/gwmw"
@@ -12,7 +13,6 @@ import (
 	"github.com/yetone/magpie/internal/maskrec"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
-	"github.com/yetone/magpie/internal/usage"
 )
 
 // redacted masks a request's secrets, as the settings say, before it goes
@@ -265,16 +265,22 @@ func maskedCopy(ctx context.Context, body []byte) []byte {
 	return b
 }
 
-// bodiesKeptAway says a request's body may be kept off this computer: an
-// observer wants it (the OTLP export, a JS plugin's observer) or the
-// request archive is on. A request sent unmasked is masked for them all
-// the same.
-func bodiesKeptAway() bool {
-	if usage.ObservedBodies() != usage.NoBodies {
-		return true
-	}
-	_, on := archiveDest()
-	return on
+// laterMasked is the body of a request that went as written, masked the
+// first time an observer is handed it (withBodies): after its try, never
+// on its way (#3973). nil when masking fails: nothing unmasked is handed
+// on in its place.
+type laterMasked struct {
+	once  sync.Once
+	ctx   context.Context
+	plain []byte
+	b     []byte
+}
+
+func (l *laterMasked) body() []byte {
+	l.once.Do(func() {
+		l.b, l.plain = maskedCopy(l.ctx, l.plain), nil
+	})
+	return l.b
 }
 
 // unredactedRoute says a request resolved to p, or to the group whose
@@ -297,9 +303,10 @@ func unredactedRoute(p provider.Provider, isGroup bool, ms []provider.Member) bo
 	if !p.SkipsRedaction() {
 		return false
 	}
-	for _, id := range p.Fallback {
-		// one that resolves to nothing isn't tried (plan)
-		if fp, _, ok := provider.Resolve(id); ok && !fp.SkipsRedaction() {
+	// one that resolves to nothing isn't tried (plan); a routing group
+	// among them is each of its members
+	for _, m := range provider.FallbackModels(p) {
+		if !m.Provider.SkipsRedaction() {
 			return false
 		}
 	}

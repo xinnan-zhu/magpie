@@ -16,7 +16,7 @@ magpie.plugin("redact", (ctx) => {
     title: "Masking",
     html: `
   <section class="msk-card" id="maskCard"></section>
-  <section class="msk-demo" id="maskDemo">
+  <section class="msk-demo" id="maskDemo" data-no-pii>
     <button type="button" class="md-row" id="mdRow" aria-expanded="false" aria-controls="mdBody">
       <span class="md-thumb" aria-hidden="true"></span>
       <span class="md-words"><span class="md-name" data-t>How masking works</span><span class="md-sub" data-t>Little Magpie walks one request through: passwords become placeholders before it leaves, and come back on your computer with the answer</span></span>

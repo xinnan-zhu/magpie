@@ -35,6 +35,13 @@ const (
 	ccBranch    = "e68bf017-47a8-4a3a-8ea7-053006ca6201"
 	// compacted-branch-last.jsonl: a /branch made after "rw prompt eight"
 	ccLastBranch = "edc82b93-a527-4e55-b00a-89fcbf31c8cf"
+	// subagent.jsonl is a session whose first prompt ran a subagent
+	// (subagent-agent.jsonl, in the session's own subagents folder), and
+	// subagent-fork.jsonl `claude --resume <it> --fork-session` with a
+	// prompt of its own; Claude Code 2.1.312 left the subagent's file in
+	// the first session's folder only. Each reply is 1000 in, 100 out.
+	ccSubagent     = "cdf0c391-6ae3-4273-b9be-7c5532e57d7c"
+	ccSubagentFork = "3a87a3d2-c7ee-4d3c-b559-ff8bdbac43a5"
 )
 
 // ccForkFixture writes the fixtures named (by file, to the id it is saved
@@ -66,6 +73,10 @@ func ccForkFixture(t *testing.T, dir string, files ...[2]string) {
 			from = ccBranch
 		case "compacted-branch-last.jsonl":
 			from = ccLastBranch
+		case "subagent.jsonl":
+			from = ccSubagent
+		case "subagent-fork.jsonl":
+			from = ccSubagentFork
 		default:
 			from = ccForkOther
 		}
@@ -323,5 +334,111 @@ func TestMergeExternalKnowsCopies(t *testing.T) {
 	out := MergeExternal(native, []ExternalSession{{Agent: "claude", ID: ccOriginal, Title: "x"}})
 	if len(out) != 1 {
 		t.Errorf("rows = %d, want 1: the copy came back from the gateway", len(out))
+	}
+}
+
+// ccStatTokens is what the stats of every day give the fixture's project:
+// the days' usage, as the overview's total sums it, and the sessions'.
+func ccStatTokens(t *testing.T) (days, sessions Tokens) {
+	t.Helper()
+	st := StatsFor(0)
+	for _, d := range st.Days {
+		for _, u := range d.Usage {
+			if u.Agent == "claude" && u.Cwd == "/w/proj" {
+				days.Input += u.Input
+				days.Output += u.Output
+			}
+		}
+	}
+	for _, s := range st.Sessions {
+		if s.Agent == "claude" && s.Cwd == "/w/proj" {
+			sessions.Input += s.Input
+			sessions.Output += s.Output
+		}
+	}
+	return days, sessions
+}
+
+// beautiful2674 (Discord): after an update the Usage page's whole-history
+// total was ~200M tokens less. A session forked with a turn of its own
+// holds the first session's last message, so the first is its copy and was
+// left out of the stats whole, and with it its subagent's file, which
+// Claude Code leaves in the first session's folder only. The conversation
+// both hold is counted once, the subagent's reply too: 3 replies of the
+// first session, its subagent's 1, and the fork's own 1.
+func TestClaudeForkedSessionsSubagentIsCounted(t *testing.T) {
+	claude, _ := setup(t)
+	ccForkFixture(t, claude,
+		[2]string{"subagent.jsonl", ccSubagent},
+		[2]string{"subagent-fork.jsonl", ccSubagentFork})
+	sub := filepath.Join(claude, "projects", "-w-proj", ccSubagent, "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join("testdata", "claude-forks", "subagent-agent.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sub, "agent-a889d0f781e3c8503.jsonl")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-30 * time.Minute)
+	if err := os.Chtimes(p, at, at); err != nil {
+		t.Fatal(err)
+	}
+	Reset()
+	if got := ccRows("claude"); !slices.Equal(got, []string{ccSubagentFork}) {
+		t.Fatalf("rows = %v, want the fork, which holds the first session, %s", got, ccSubagentFork)
+	}
+	days, sessions := ccStatTokens(t)
+	want := Tokens{Input: 5000, Output: 500}
+	if days.Input != want.Input || days.Output != want.Output {
+		t.Errorf("days' tokens = %d in, %d out; want %d in, %d out", days.Input, days.Output, want.Input, want.Output)
+	}
+	if sessions.Input != want.Input || sessions.Output != want.Output {
+		t.Errorf("sessions' tokens = %d in, %d out; want %d in, %d out", sessions.Input, sessions.Output, want.Input, want.Output)
+	}
+}
+
+// A /branch made after a compaction holds only the summary and what
+// follows it. When the branch goes on and the session it was made of
+// doesn't, the session is the branch's copy, and what it said before the
+// compaction is in no other file: it is counted all the same. compacted.jsonl
+// as it was when the branch was made (before "rw prompt eight") spent 7
+// replies of 10 in; the branch holds one of them, after the summary, and
+// went on with one of its own.
+func TestClaudeCopyBeforeACompactionIsCounted(t *testing.T) {
+	claude, _ := setup(t)
+	ccForkFixture(t, claude,
+		[2]string{"compacted.jsonl", ccCompacted},
+		[2]string{"compacted-branch-on.jsonl", ccBranch})
+	p := filepath.Join(claude, "projects", "-w-proj", ccCompacted+".jsonl")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(string(b), "rw prompt eight")
+	if i < 0 {
+		t.Fatal("compacted.jsonl has no \"rw prompt eight\"")
+	}
+	b = b[:strings.LastIndexByte(string(b[:i]), '\n')+1]
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	Reset()
+	if got := ccRows("claude"); !slices.Equal(got, []string{ccBranch}) {
+		t.Fatalf("rows = %v, want the branch that went on, %s", got, ccBranch)
+	}
+	days, sessions := ccStatTokens(t)
+	if days.Input != 80 || sessions.Input != 80 {
+		t.Errorf("tokens in = %d (days), %d (sessions); want 80: 70 of the session, 10 the branch's own", days.Input, sessions.Input)
 	}
 }

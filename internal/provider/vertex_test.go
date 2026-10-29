@@ -177,6 +177,10 @@ func (f *vertexGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case vertex && strings.Contains(r.URL.Path, "/models/gemini-9-pro:"):
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, "{\"error\":{\"code\":404,\"message\":\"Publisher Model `projects/acme-vertex/locations/global/publishers/google/models/gemini-9-pro` was not found or your project does not have access to it. Please ensure you are using a valid model version. For more information, see: https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions\",\"status\":\"NOT_FOUND\"}}")
+	case vertex && strings.HasSuffix(r.URL.Path, "/endpoints/openapi/chat/completions"):
+		// a partner model, on Google's OpenAI-compatible chat completions,
+		// answered as its docs show
+		io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","created":1761609600,"model":"deepseek-ai/deepseek-v4.1-flash-maas","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	case vertex:
 		io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"gemini-3.8-flash"}`)
 	default:
@@ -502,7 +506,7 @@ func TestVertexProviderListed(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "https://aiplatform.googleapis.com/v1/projects/acme-vertex/locations/global"
-	if !p.Ready() || !p.On() || !slices.Equal(p.Speaks(), []Protocol{Gemini}) || p.Base(Gemini) != base {
+	if !p.Ready() || !p.On() || !slices.Equal(p.Speaks(), []Protocol{Chat, Gemini}) || p.Base(Gemini) != base || p.Base(Chat) != base+"/endpoints/openapi" {
 		t.Fatalf("ready %v, on %v, speaks %v at %q", p.Ready(), p.On(), p.Speaks(), p.Base(Gemini))
 	}
 	if !customIDs()["vertex-prod"] || PluginID("vertex-prod") != "vertex-prod-plugin" {
@@ -1556,4 +1560,94 @@ func TestVertexMintWaitCancelled(t *testing.T) {
 	}
 	stop()
 	<-minted
+}
+
+// Vertex AI's partner models (DeepSeek, GLM, gpt-oss: publisher/model ids)
+// are served on Google's OpenAI-compatible chat completions at the
+// project, …/endpoints/openapi/chat/completions, signed with the same
+// Google token as Gemini, with nothing more set by the user: global lists
+// them, each is tested there with its full id in the body, and a Gemini
+// model is still asked on generateContent alone. The provider's own test
+// asks Gemini, as a partner model answers only once the project turned it
+// on in Model Garden.
+func TestVertexPartnerModels(t *testing.T) {
+	vertexHome(t)
+	f := newVertexGoogle(t)
+	file := filepath.Join(t.TempDir(), "application_default_credentials.json")
+	writeFile(t, file, vertexUser("1//0g-test-refresh"))
+	if err := Save(vertexAt("global", file)); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("vertex-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := f.url + "/vertex/v1/projects/acme-vertex/locations/global"
+	if !slices.Equal(p.Speaks(), []Protocol{Chat, Gemini}) || p.Base(Chat) != base+"/endpoints/openapi" || p.Base(Gemini) != base {
+		t.Fatalf("speaks %v, chat at %q, Gemini at %q", p.Speaks(), p.Base(Chat), p.Base(Gemini))
+	}
+	partners := []string{"deepseek-ai/deepseek-v4.1-flash-maas", "zai-org/glm-5.2-maas", "openai/gpt-oss-120b-maas"}
+	listed := modelIDs(p.Available())
+	for _, m := range partners {
+		if !slices.Contains(listed, m) {
+			t.Errorf("%s not listed at global: %v", m, listed)
+		}
+		if apis := p.APIs(m); !slices.Equal(apis, []Protocol{Chat}) {
+			t.Errorf("%s asked on %v", m, apis)
+		}
+		if p.Native(m) != Chat {
+			t.Errorf("%s native %v", m, p.Native(m))
+		}
+	}
+	if apis := p.APIs("gemini-3.8-flash"); !slices.Equal(apis, []Protocol{Gemini}) {
+		t.Errorf("Gemini asked on %v", apis)
+	}
+	for _, loc := range []string{"us", "us-central1"} {
+		q := vertexAt(loc, file)
+		if err := Save(q); err != nil {
+			t.Fatal(err)
+		}
+		q2, _ := Find("vertex-prod")
+		if got := modelIDs(q2.Available()); slices.ContainsFunc(got, VertexPartner) {
+			t.Errorf("at %s, which serves no partner model: %v", loc, got)
+		}
+	}
+	if err := Save(vertexAt("global", file)); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = Find("vertex-prod")
+	rs := p.Test(context.Background())
+	if len(rs) != 1 || !rs[0].OK || rs[0].Protocol != Gemini {
+		t.Fatalf("provider test: %+v", rs)
+	}
+	rs = p.TestModels(context.Background(), []string{"deepseek-ai/deepseek-v4.1-flash-maas", "gemini-3.8-flash"})
+	if len(rs) != 2 || !rs[0].OK || rs[0].Protocol != Chat || !rs[1].OK || rs[1].Protocol != Gemini {
+		t.Fatalf("models' tests: %+v", rs)
+	}
+	calls := f.vertexCalls()
+	if len(calls) != 3 {
+		t.Fatalf("Vertex AI was asked %d times, want 3: %+v", len(calls), calls)
+	}
+	// the models' tests may go out together, in either order
+	var chats int
+	for _, c := range calls {
+		if strings.HasSuffix(c.path, "/endpoints/openapi/chat/completions") {
+			chats++
+			var body struct {
+				Model string `json:"model"`
+			}
+			json.Unmarshal([]byte(c.body), &body)
+			if c.path != "/vertex/v1/projects/acme-vertex/locations/global/endpoints/openapi/chat/completions" ||
+				c.header.Get("Authorization") != "Bearer ya29.minted-1" || body.Model != "deepseek-ai/deepseek-v4.1-flash-maas" {
+				t.Errorf("partner model asked at %s with %q: %s", c.path, c.header.Get("Authorization"), c.body)
+			}
+			continue
+		}
+		if !strings.HasPrefix(c.path, "/vertex/v1/projects/acme-vertex/locations/global/publishers/google/models/gemini-") || !strings.HasSuffix(c.path, ":generateContent") {
+			t.Errorf("Gemini asked at %s", c.path)
+		}
+	}
+	if chats != 1 {
+		t.Errorf("chat completions asked %d times, want 1", chats)
+	}
 }

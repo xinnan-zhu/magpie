@@ -174,6 +174,15 @@ func VertexPath(model string) string {
 	return "/publishers/google/models/" + url.PathEscape(model) + ":streamGenerateContent?alt=sse"
 }
 
+// VertexPartner is whether model is one of Vertex AI's partner or open
+// models (Model as a Service: DeepSeek, GLM, gpt-oss, Gemma, Llama…),
+// which Google serves on its OpenAI-compatible chat completions at the
+// project (Base(Chat), …/endpoints/openapi) under a publisher/model id
+// such as deepseek-ai/deepseek-v4.1-flash-maas. Every such id models.dev
+// lists for google-vertex has the publisher before a slash, and no Gemini
+// id on generateContent has one, so the slash is what tells them apart.
+func VertexPartner(model string) bool { return strings.Contains(model, "/") }
+
 // VertexWholePath is where a request for model answered as one JSON body
 // goes.
 func VertexWholePath(model string) string {
@@ -215,9 +224,10 @@ func vertexGeneration(model string) int {
 	return n
 }
 
-// vertexModels are the Gemini models a location serves, as each answered
+// vertexModels are the models a location serves, as each answered
 // on 2026-10-06: every one at global (and Gemini 4 Argon, there since
-// 2026-10-13, #2155); Gemini 3's Flash models at us and
+// 2026-10-13, #2155, and the partner models Google serves at global
+// alone, VertexPartner); Gemini 3's Flash models at us and
 // eu, which serve no Pro, preview or 2.5; Gemini 2.5 at a region, where a
 // few add one more (asia-northeast1's gemini-3.5-flash), typed in by hand.
 func vertexModels(loc string) []string {

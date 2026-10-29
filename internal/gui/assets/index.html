@@ -174,6 +174,14 @@
         <div class="who"><div class="name" data-t>Colorblind mode</div></div>
         <div id="colorblindSegs"></div>
       </div>
+      <div class="row pref" id="reduceMotionRow">
+        <div class="who"><div class="name" data-t>Reduce motion</div></div>
+        <div id="reduceMotionSegs"></div>
+      </div>
+      <div class="row pref" id="birdRow">
+        <div class="who"><div class="name" data-t>Loading bird</div></div>
+        <div id="birdSegs"></div>
+      </div>
       <div class="row pref">
         <div class="who"><div class="name" data-t>Language</div></div>
         <button type="button" id="langPick" class="sess-pick pref-pick" aria-label="Language" aria-haspopup="menu" aria-expanded="false"></button>
@@ -302,6 +310,10 @@
       <div class="row pref" id="turnDoneRow">
         <div class="who"><div class="name" data-t>Task done alert</div><div class="sub" id="turnDoneSub"></div></div>
         <div id="turnDoneSegs"></div>
+      </div>
+      <div class="row pref" id="maskAlertRow" data-feature="redact">
+        <div class="who"><div class="name" data-t>Masking alert</div><div class="sub wraps" data-t>A notification when masking swaps a value for the first time: its kind and how many, never the value itself</div></div>
+        <div id="maskAlertSegs"></div>
       </div>
     </div>
     <div class="row-head warm-head" data-feature="warmups"><div class="warm-tabs" id="warmTabs" role="tablist">
@@ -461,11 +473,11 @@
     <div id="codexAgentsV1Segs"></div>
   </div>
   <div class="row pref" id="codexSubagentModelRow" hidden>
-    <div class="who"><div class="name" data-t>Codex subagent model</div></div>
+    <div class="who"><div class="name" data-t>Codex subagent model</div><div class="sub"></div></div>
     <div class="val" id="codexSubagentModelPick"></div>
   </div>
   <div class="row pref" id="fullContextRow">
-    <div class="who"><div class="name" data-t>Long conversations</div><div class="sub" data-t>Codex and Claude Code compact at 272K (non-Claude [1m] too) or the size typed; full window: slower, costlier</div></div>
+    <div class="who"><div class="name" data-t>Long conversations</div><div class="sub" data-t>Codex, Claude Code and Grok Build compact at 272K (non-Claude [1m] too) or the size typed; full window: slower, costlier</div></div>
     <div id="fullContextSegs"></div>
   </div>
   <div class="row pref" id="codexAsyncRow">
@@ -521,6 +533,7 @@
 <script src="plugins/redact/demo.js"></script>
 <script src="plugins/otel/page.js"></script>
 <script src="plugins/gateway/settings.js"></script>
+<script src="plugins/search/settings.js"></script>
 <script src="start.js"></script>
 </body>
 </html>

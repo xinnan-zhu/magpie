@@ -247,7 +247,7 @@ func TestMaskJSONToolArgsMasked(t *testing.T) {
 	for _, c := range []struct{ name, body string }{
 		{"signature key", `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"send_email","input":{"signature":"Best, Bob","body":"DB_PASSWORD=hunter2abc1 call 13800138000"}}]}]}`},
 		{"id keys", `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"user_id":"DB_PASSWORD=hunter2abc1","phone_id":"13800138000"}}]}]}`},
-		{"gemini args", `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"thoughtSignature":"x","customer_id":"13800138000","note":"DB_PASSWORD=hunter2abc1"}}}]}]}`},
+		{"gemini args", `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"thoughtSignature":"x","customer_phone":"13800138000","note":"DB_PASSWORD=hunter2abc1"}}}]}]}`},
 		{"text block", `{"messages":[{"role":"user","content":[{"type":"text","text":"DB_PASSWORD=hunter2abc1 call 13800138000","signature":"x"}]}]}`},
 	} {
 		out, _ := MaskJSON([]byte(c.body), o)

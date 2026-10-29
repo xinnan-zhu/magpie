@@ -76,6 +76,7 @@ type updater struct {
 	// called off, which isn't restarted into by itself again.
 	autoRestart func() bool
 	autoSkip    string
+	waitAsked   bool // the restart waiting was a click's
 }
 
 type updateJSON struct {
@@ -241,20 +242,47 @@ func (u *updater) download() bool {
 
 // recheck asks the feed again before a restart into what was downloaded,
 // so a newer version out since is the one restarted into. It waits for
-// the feed a little while; a newer version is then downloading.
-func (u *updater) recheck() {
+// the feed a little while (recheckTicks of recheckTick); a newer version
+// is then downloading. asked is a click on Restart to update, which asks
+// for the newest: with Settings' NoAutoDownload on too, a newer version
+// out since is downloaded and restarted into, not the one the last check
+// found (coeo91 on Discord).
+func (u *updater) recheck(asked bool) {
 	if u.begin() {
+		u.mu.Lock()
+		u.fetch = asked
+		u.mu.Unlock()
 		go u.run()
 	}
-	for range 50 {
-		u.mu.Lock()
-		s := u.state
-		u.mu.Unlock()
-		if s != "checking" {
+	for range recheckTicks {
+		if !u.asking() {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(recheckTick)
 	}
+}
+
+// askedOver is whether the feed was last asked over d ago.
+func (u *updater) askedOver(d time.Duration) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return time.Since(u.asked) >= d
+}
+
+// recheckTicks of recheckTick is how long recheck waits for the feed;
+// tests shorten it.
+var (
+	recheckTicks = 50
+	recheckTick  = 200 * time.Millisecond
+)
+
+// asking is whether the feed is being asked. The state then reads
+// "ready" while an older download waits (jsonIn), which a restart doesn't
+// go into: the answer may name a newer one.
+func (u *updater) asking() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.state == "checking"
 }
 
 // freshAfter is how long the feed's answer stays fresh for the dialog
@@ -268,7 +296,7 @@ func (u *updater) freshen() {
 	stale := u.state == "ready" && u.staged != "" && time.Since(u.asked) >= freshAfter
 	u.mu.Unlock()
 	if stale {
-		u.recheck()
+		u.recheck(false) // the dialog asks for nothing to be downloaded
 	}
 }
 
@@ -641,12 +669,20 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 						return true
 					}
 					return false
-				})
+				}, true)
 				writeJSON(rw, updates.json())
 				return
 			}
 			updates.cancelWait()
-			updates.recheck()
+			updates.recheck(true)
+			if updates.asking() {
+				// the feed hasn't answered yet: the page reads again and
+				// restarts once it has, into the newest
+				j := updates.json()
+				j.State = "checking"
+				writeJSON(rw, j)
+				return
+			}
 		}
 		switch j := updates.json(); {
 		case j.State == "ready":
@@ -660,6 +696,14 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 			// NoAutoDownload says (#2296)
 			updates.download()
 		case j.State == "available" && j.URL != "":
+			// the newest's page, not the one the last check found: a check
+			// over a minute old is made again first (coeo91 on Discord)
+			if updates.askedOver(time.Minute) {
+				updates.recheck(true)
+				if j = updates.json(); j.URL == "" {
+					break
+				}
+			}
 			_ = w.OpenURL(j.URL) // nothing waits on the page: the card still shows the update
 		}
 		writeJSON(rw, updates.json())

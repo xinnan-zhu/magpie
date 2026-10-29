@@ -970,8 +970,9 @@ func rtkInstall(bin string, a *agent.Agent) error {
 // rtkScript is rtk's own installer, which puts it in ~/.local/bin.
 const rtkScript = "https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh"
 
-// rtkInstaller is how rtk is installed here: with Homebrew when there is
-// one, winget on Windows, else rtk's own script; nil when there's no way.
+// rtkInstaller is how rtk is installed here: with Homebrew when it has
+// rtk's bottle for this computer, winget on Windows, else rtk's own
+// script; nil when there's no way.
 func rtkInstaller() []string {
 	if runtime.GOOS == "windows" {
 		if _, err := proc.Look("winget"); err == nil {
@@ -979,13 +980,68 @@ func rtkInstaller() []string {
 		}
 		return nil
 	}
-	if _, err := proc.Look("brew"); err == nil {
+	if brew, err := proc.Look("brew"); err == nil && brewBottled(brew) {
 		return []string{"brew", "install", "rtk"}
 	}
 	if _, err := proc.Look("curl"); err == nil {
 		return []string{"sh", "-c", "curl -fsSL " + rtkScript + " | sh"}
 	}
 	return nil
+}
+
+// brewBottled says whether Homebrew installs rtk on this computer from its
+// bottle, a download of seconds. Without one, `brew install rtk` builds rtk
+// from source, and first the Rust, LLVM and Python it builds with: hours,
+// while Install RTK waits five minutes, so it never finished and was ended
+// each time it was tried again (Scott__D on X). Homebrew bottles rtk for
+// Apple silicon on the newest macOS versions only: not for an Intel Mac,
+// nor for macOS 14 and older (brew there would install 19 formulae, rust
+// and llvm among them, from source). brew info says which: "rtk: stable
+// 1.1.0 (bottled)" only when brew would pour the bottle here. A brew that
+// doesn't say, or doesn't answer, is not used: rtk's own script, which
+// downloads rtk's release for this system, is.
+//
+// ReadRTK asks it on every read while rtk isn't installed, so the answer is
+// kept for brewBottledFor, per brew.
+var brewBottled = func(brew string) bool {
+	bottled.Lock()
+	defer bottled.Unlock()
+	if bottled.brew == brew && time.Since(bottled.at) < brewBottledFor {
+		return bottled.ok
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brewInfoWait)
+	defer cancel()
+	cmd := proc.CommandContext(ctx, brew, "info", "rtk")
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_ENV_HINTS=1", "NONINTERACTIVE=1")
+	out, err := cmd.Output()
+	ok := err == nil && brewSaysBottled(string(out))
+	bottled.brew, bottled.ok, bottled.at = brew, ok, time.Now()
+	return ok
+}
+
+var bottled struct {
+	sync.Mutex
+	brew string
+	ok   bool
+	at   time.Time
+}
+
+const brewBottledFor = time.Hour
+
+// brewInfoWait is how long brew info is given: it may first download
+// Homebrew's formula list when its copy is old.
+var brewInfoWait = 30 * time.Second
+
+// brewSaysBottled reads brew info rtk's first line, "==> rtk: stable 1.1.0
+// (bottled), HEAD".
+func brewSaysBottled(out string) bool {
+	for _, l := range strings.Split(ansiSeq.ReplaceAllString(out, ""), "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "==> rtk: ") {
+			return strings.Contains(l, "(bottled)")
+		}
+	}
+	return false
 }
 
 // InstallRTK installs rtk, when the user asks for it.

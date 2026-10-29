@@ -187,3 +187,92 @@ func copiesByKeeper(copies map[string]string, groups map[string][]file) map[stri
 	}
 	return out
 }
+
+// ccRestMemo is, for each copy's own file, what it holds that the session
+// it is kept in doesn't (ccRest), while neither file has changed. Under mu.
+var ccRestMemo = map[string]*ccRestOf{}
+
+type ccRestOf struct {
+	size, mod   int64
+	keeper      string
+	ksize, kmod int64
+	st          *state
+}
+
+// ccRest is the copy's file read for its messages the keeper's file
+// doesn't hold. A copy holds the conversation along its last message
+// only: what came before a compaction it started after, what /rewind
+// left on another branch and a subagent's messages written in the file
+// are in no other file, and were spent all the same. Copies that are
+// copies through and through come out empty.
+func ccRest(copyFile, keeper file) *state {
+	m := ccRestMemo[copyFile.path]
+	if m != nil && m.size == copyFile.size && m.mod == copyFile.mod.UnixNano() &&
+		m.keeper == keeper.path && m.ksize == keeper.size && m.kmod == keeper.mod.UnixNano() {
+		return m.st
+	}
+	held := ccUUIDsOf(keeper)
+	line := parserFor(copyFile.agent).line
+	s := &state{}
+	_, err := scanThin(copyFile.path, 0, nil, thinClaude, func(b []byte, _, _ int64) bool {
+		if !bytes.Contains(b, ccUser) && !bytes.Contains(b, ccAssistant) {
+			return true
+		}
+		r := gjson.GetManyBytes(b, "type", "uuid")
+		if t := r[0].String(); t != "user" && t != "assistant" || r[1].Type != gjson.String || held[r[1].String()] {
+			return true
+		}
+		line(s, b, copyFile.main)
+		return true
+	})
+	if err != nil {
+		// unread is not empty: the copy is counted whole, as before it was
+		// known to be one, until it reads
+		return cache[copyFile.path]
+	}
+	ccRestMemo[copyFile.path] = &ccRestOf{copyFile.size, copyFile.mod.UnixNano(), keeper.path, keeper.size, keeper.mod.UnixNano(), s}
+	return s
+}
+
+// ccCopyStates is what each file of a copy adds to the session it is kept
+// in: a subagent's file whole, as Claude Code leaves it in the folder of
+// the session it ran in and copies none of it, and the copy's own file for
+// what the keeper doesn't hold (ccRest). By the file's path.
+func ccCopyStates(files []file, copies map[string]string) map[string]*state {
+	if len(copies) == 0 {
+		clear(ccRestMemo)
+		return nil
+	}
+	mains := map[string]file{}
+	for _, f := range files {
+		if f.main {
+			mains[f.key] = f
+		}
+	}
+	out := map[string]*state{}
+	for _, f := range files {
+		keeper := copies[f.key]
+		if keeper == "" {
+			continue
+		}
+		if !f.main {
+			if st := cache[f.path]; st != nil {
+				out[f.path] = st
+			}
+			continue
+		}
+		k, ok := mains[keeper]
+		if !ok {
+			continue
+		}
+		if st := ccRest(f, k); st != nil {
+			out[f.path] = st
+		}
+	}
+	for p := range ccRestMemo {
+		if out[p] == nil {
+			delete(ccRestMemo, p)
+		}
+	}
+	return out
+}

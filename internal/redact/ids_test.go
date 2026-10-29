@@ -76,7 +76,7 @@ func TestIDsGoAsWritten(t *testing.T) {
 	}
 
 	// a phone number and a card number of their own are still masked
-	for _, in := range []string{"call 13800138000", "card 4111-1111-1111-1111", "call a13800138000"} {
+	for _, in := range []string{"call 13800138000", "card 4111-1111-1111-1111", "call +8613800138000"} {
 		forgetIDs()
 		if out, n := Mask(in, o); n != 1 || out == in {
 			t.Errorf("%q went as %q", in, out)

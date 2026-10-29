@@ -6,4 +6,4 @@ package gui
 func webkitDefaults() {}
 
 // webkitPlaysVideo: the other systems' webviews play video.
-func webkitPlaysVideo() bool { return true }
+var webkitPlaysVideo = func() bool { return true }

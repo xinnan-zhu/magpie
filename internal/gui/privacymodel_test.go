@@ -33,7 +33,8 @@ func TestPrivacyModelOnlyOnOnceDownloaded(t *testing.T) {
 	if rec := do("GET", "/api/privacy-model", ""); rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &st) != nil {
 		t.Fatalf("state: %d %s", rec.Code, rec.Body)
 	}
-	if st.On || st.Installed || st.Size == 0 {
+	// on by default, not by the user, and not downloaded yet
+	if !st.On || st.Chosen || st.Installed || st.Size == 0 {
 		t.Fatalf("state %+v", st)
 	}
 	if !pii.Supported() {
@@ -65,8 +66,28 @@ func TestPrivacyModelOnlyOnOnceDownloaded(t *testing.T) {
 	if rec := do("POST", "/api/privacy-model", `{"do":"off"}`); rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &st) != nil || st.On {
 		t.Fatalf("off: %d %s", rec.Code, rec.Body)
 	}
-	if settings.Load().RedactModel {
+	if st := settings.Load(); st.RedactModel || !st.RedactModelOff {
 		t.Fatal("off not saved")
+	}
+}
+
+// The model on by default whose download is cancelled is turned off, the
+// user's own off: the next request would start the download again.
+func TestPrivacyModelCancelledDefaultIsOff(t *testing.T) {
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("USERPROFILE", h)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	srv := Handler(webHost{func() {}}, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("POST", "/api/privacy-model", strings.NewReader(`{"do":"cancel"}`)))
+	var st privacyModelJSON
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &st) != nil || st.On {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body)
+	}
+	if !settings.Load().RedactModelOff {
+		t.Fatal("cancelled default not saved off")
 	}
 }
 
@@ -137,9 +158,13 @@ func TestPrivacyModelPick(t *testing.T) {
 		}
 		return st
 	}
-	if st := do(""); st.On || st.Model != pii.AstrLinkGuard || len(st.Models) != 2 || st.Models[0].Model != pii.PrivacyFilter {
+	if st := do(""); !st.On || st.Chosen || st.Model != pii.AstrLinkGuard || len(st.Models) != 2 || st.Models[0].Model != pii.PrivacyFilter {
 		t.Fatalf("a new user's state: %+v", st)
 	}
+	if st := do(`{"do":"off"}`); st.On || !settings.Load().RedactModelOff {
+		t.Fatalf("turned off: %+v", st)
+	}
+	did = nil
 	if st := do(`{"do":"pick","model":"privacy-filter"}`); st.On || st.Model != pii.PrivacyFilter || len(did) != 0 {
 		t.Fatalf("picked while off: %+v, %v", st, did)
 	}

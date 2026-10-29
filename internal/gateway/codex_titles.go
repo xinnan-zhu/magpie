@@ -52,7 +52,7 @@ var CodexSideModel func() string
 // models picked beside the ChatGPT sign-in every one of them went to
 // ChatGPT and spent its allowance, and failed with it once it was used up
 // (atom_Ray on X: an hour on a third-party model took 2% of the 5-hour
-// window). Those go on the session's model (session: Server.codexSessionOf),
+// window). Those go on the session's model (session: Server.codexSideSession),
 // as the conversation's turns do; on Codex's own, as Codex sent them.
 func codexSideTo(body []byte, ours bool, session func() string) string {
 	m := modelOf(body)

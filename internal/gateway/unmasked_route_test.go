@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,22 +35,29 @@ func (c countedMasker) Writer(w http.ResponseWriter) (http.ResponseWriter, func(
 // unmasked was masked all the same before it was routed, and the masked
 // body thrown away, up to minutes of magpie's own time for each. Now it
 // isn't masked at all, a chat or a token count, and the log has it as it
-// went; one that goes to a vendor, an unknown model's, or one an observer
-// keeps the bodies of is masked as before.
+// went; one that goes to a vendor, or an unknown model's, is masked as
+// before. With the request archive on it was masked all the same (#3973,
+// wangbinyq: 请求归档开启的话, 还是会先走脱敏路径): the archive keeps it as
+// it went now. An observer that keeps the bodies is handed them masked,
+// masked after the try instead of before it.
 func TestUnmaskedRouteIsNotMasked(t *testing.T) {
 	const key = "sk-proj-abcdEFGH1234ijklMNOP5678qrst"
+	const placeholder = "{{API_KEY_" // the key masked; the archive and an export take it out otherwise
 	chat := `{"model":"fake/m1","max_tokens":10,"messages":[{"role":"user","content":"my key is ` + key + `"}]}`
 	count := `{"model":"fake/m1","messages":[{"role":"user","content":"my key is ` + key + `"}]}`
 	cases := []struct {
 		name     string
 		set      bool
 		observed bool
+		archived bool
 		masks    bool // the masker is asked
 		whole    bool // the provider is sent the key
 	}{
 		{name: "set to go unmasked", set: true, whole: true},
 		{name: "unset", masks: true},
 		{name: "an observer keeps the bodies", set: true, observed: true, masks: true, whole: true},
+		{name: "the request archive is on", set: true, archived: true, whole: true},
+		{name: "the archive is on, unset", archived: true, masks: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,11 +71,17 @@ func TestUnmaskedRouteIsNotMasked(t *testing.T) {
 			if err := provider.Save(*p); err != nil {
 				t.Fatal(err)
 			}
-			if err := settings.Save(settings.Settings{Redact: true}); err != nil {
+			if err := settings.Save(settings.Settings{Redact: true, RequestArchive: tc.archived}); err != nil {
 				t.Fatal(err)
 			}
+			obs := &fakeObserver{watch: true, bodies: usage.CapturedBodies}
 			if tc.observed {
-				t.Cleanup(usage.Observe(&fakeObserver{bodies: usage.CapturedBodies}))
+				t.Cleanup(usage.Observe(obs))
+			}
+			bucket := &memBucket{objs: map[string][]byte{}}
+			if tc.archived {
+				t.Setenv("TMPDIR", t.TempDir())
+				archiveTo(t, bucket)
 			}
 			withoutMasker(t)
 			n := new(atomic.Int64)
@@ -85,11 +99,31 @@ func TestUnmaskedRouteIsNotMasked(t *testing.T) {
 				t.Fatalf("masked %d times, want masking %v", n.Load(), tc.masks)
 			}
 			c := s.Recent()[0]
-			if logged := strings.Contains(c.RequestBody, key); logged != !tc.masks {
-				t.Fatalf("the log has the key %v, want %v: %s", logged, !tc.masks, c.RequestBody)
+			if logged := strings.Contains(c.RequestBody, key); logged != tc.whole {
+				t.Fatalf("the log has the key %v, want %v: %s", logged, tc.whole, c.RequestBody)
 			}
 			if c.RequestBody == "" {
 				t.Fatal("the log has no body")
+			}
+			if tc.observed {
+				obs.mu.Lock()
+				got := obs.attempts
+				obs.mu.Unlock()
+				if len(got) == 0 || !strings.Contains(got[0].BodyIn, placeholder) || strings.Contains(got[0].BodyIn, key) {
+					t.Fatalf("the observer was handed %+v", got)
+				}
+			}
+			if tc.archived {
+				archivePending.Wait()
+				var a Archived
+				if err := json.Unmarshal(bucket.objs["archive/"+c.Archive+".json"], &a); err != nil {
+					t.Fatalf("%v: %v", keys(bucket.objs), err)
+				}
+				// as it went: masked, or as written save the secrets every
+				// archived body has taken out
+				if masked := strings.Contains(a.Request.Body, placeholder); masked == tc.whole || a.Request.Body == "" || strings.Contains(a.Request.Body, key) {
+					t.Fatalf("the archive kept %s", a.Request.Body)
+				}
 			}
 			n.Store(0)
 			f.reply = `{"input_tokens":17}`

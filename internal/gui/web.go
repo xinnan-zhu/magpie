@@ -324,21 +324,14 @@ func NetworkLinks(port, key string) []string {
 
 // LANAddrs are this computer's addresses on the local network, for the
 // links to print when the page is served there: MAGPIE_PUBLIC_URL's host
-// when set (in a container, whose own addresses the network can't reach).
+// when set (in a container, whose own addresses the network can't reach),
+// else the gateway's own (gateway.LANHosts), so Settings lists one
+// computer's addresses the same way twice.
 func LANAddrs() []string {
 	if h := gateway.PublicHost(); h != "" {
 		return []string{h}
 	}
-	var out []string
-	as, _ := net.InterfaceAddrs()
-	for _, a := range as {
-		n, ok := a.(*net.IPNet)
-		if !ok || n.IP.IsLoopback() || n.IP.To4() == nil || !n.IP.IsPrivate() {
-			continue
-		}
-		out = append(out, n.IP.String())
-	}
-	return out
+	return gateway.LANHosts()
 }
 
 // webServed is all `magpie web` on port serves: the gateway's client

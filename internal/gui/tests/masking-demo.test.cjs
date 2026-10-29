@@ -18,12 +18,12 @@ const K = "1792987654321000001";
 const record = { key: K, t: new Date(Date.now() - 60e3).toISOString(), route: "messages", what: "chat", agent: "claude", provider: "anthropic", model: "claude-opus-4-1", n: 1,
   values: [{ p: "{{PERSON_bbbb2222}}", k: "PERSON", b: "model", h: "", l: 3, n: 1 }], snips: { "{{PERSON_bbbb2222}}": "ask {{PERSON_bbbb2222}} about it" } };
 
-function serve(lang, theme, fetched, more) {
+function serve(lang, theme, fetched, more, boot = {}) {
   const settings = { theme, lang, tray: "panel", currency: "usd", redact: true, redactPersonal: true, ...more };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"${theme}",web:true};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: true, ...boot })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [{ id: "claude", name: "Claude Code", icon: "claudecode-color", fields: [] }], profiles: [], settings });
     if (url.pathname === "/api/settings") return json(settings);
@@ -56,7 +56,7 @@ async function open(engine, lang, width, opts = {}) {
   page.setDefaultTimeout(8000);
   const errors = [], fetched = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/*", serve(lang, opts.theme || "light", fetched, opts.settings));
+  await page.route("**/*", serve(lang, opts.theme || "light", fetched, opts.settings, opts.boot));
   await page.goto("http://magpie.test/?view=masking");
   await page.locator("#mdRow").waitFor();
   return { browser, page, errors, fetched };
@@ -227,9 +227,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.deepEqual(errors, []);
   });
   // on Linux without gst-plugins-good WebKitGTK's web process aborts on any
-  // video (stock Omarchy), so there she is her poster and the sheets still move
+  // video (stock Omarchy), so there she is her poster and the sheets still
+  // move. The app says so in boot.js, as the server does; /api/state's
+  // settings never carry it (avk458 on X: the demo crashed omarchy's app)
   test(`${engine}: where the app can't play video she is her poster, and the demo still plays`, async (t) => {
-    const { browser, page, errors, fetched } = await open(engine, "en", 1100, { motion: true, settings: { noVideo: true } });
+    const { browser, page, errors, fetched } = await open(engine, "en", 1100, { motion: true, boot: { noVideo: true } });
     t.after(() => browser.close());
     await page.locator("#mdRow").click();
     await until(async () => (await state(page)).T > 1, 8000, page);
@@ -239,6 +241,27 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.deepEqual(fetched.filter((f) => f.endsWith(".webm")), []);
     const a = await state(page);
     await until(async () => (await state(page)).T > a.T + .5, 8000, page);
+    assert.deepEqual(errors, []);
+  });
+  // folded, or with the page left, the video lets go of its source, so it
+  // holds no decoder or buffered video; opened again it goes on where it was
+  test(`${engine}: folded or left, the demo holds no video; opened again it goes on`, async (t) => {
+    const { browser, page, errors } = await open(engine, "en", 1100, { motion: true });
+    t.after(() => browser.close());
+    const src = () => page.evaluate(() => document.querySelector(".xqd video").getAttribute("src"));
+    await page.locator("#mdRow").click();
+    await until(async () => { const s = await state(page); return !s.paused && s.ct > 1; }, 8000, page);
+    await page.locator("#mdRow").click();
+    await until(async () => (await src()) === null, 8000, page);
+    const folded = await state(page);
+    assert.equal(folded.rs, 0, "no data held while folded");
+    await page.locator("#mdRow").click();
+    await until(async () => { const s = await state(page); return s.src === "xq_light.webm" && !s.paused && s.ct > folded.T; }, 8000, page);
+    // another page: the masking view hidden
+    await page.evaluate(() => { document.querySelector("#view-masking").hidden = true; });
+    await until(async () => (await src()) === null, 8000, page);
+    await page.evaluate(() => { document.querySelector("#view-masking").hidden = false; });
+    await until(async () => (await src()) !== null, 8000, page);
     assert.deepEqual(errors, []);
   });
 }

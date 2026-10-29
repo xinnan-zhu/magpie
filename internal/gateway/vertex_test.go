@@ -135,6 +135,22 @@ const (
 	vertexMissingSig   = "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly, and missing thought_signature may lead to degraded model performance. Additional data, function call `default_api:get_weather` , position 2. Please refer to https://ai.google.dev/gemini-api/docs/thought-signatures for more details.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
 )
 
+// vertexPartnerStream and vertexPartnerWhole are a partner model's
+// answer on Vertex AI's OpenAI-compatible chat completions, streamed and
+// whole, in the shape Google's docs for its open models show
+// (call-open-model-apis): chat.completion.chunk events, the last with the
+// finish reason and usage, then [DONE].
+const (
+	vertexPartnerStream = `data: {"id":"chatcmpl-v41","object":"chat.completion.chunk","created":1761609600,"model":"deepseek-ai/deepseek-v4.1-flash-maas","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"}}]}
+
+data: {"id":"chatcmpl-v41","object":"chat.completion.chunk","created":1761609600,"model":"deepseek-ai/deepseek-v4.1-flash-maas","choices":[{"index":0,"delta":{"content":" from DeepSeek"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}
+
+data: [DONE]
+
+`
+	vertexPartnerWhole = `{"id":"chatcmpl-v41","object":"chat.completion","created":1761609600,"model":"deepseek-ai/deepseek-v4.1-flash-maas","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from DeepSeek"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`
+)
+
 // vertexLevels are the reasoning levels models.dev gives Gemini's models.
 const vertexLevels = `{"google":{"models":{
 	"gemini-3.8-flash":{"id":"gemini-3.8-flash","reasoning_options":[{"type":"effort","values":["low","medium","high"]}]},
@@ -176,6 +192,13 @@ func (v *vertexUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		code, out, kind := http.StatusOK, vertexPong, "text/event-stream"
 		if strings.HasSuffix(r.URL.Path, ":generateContent") {
 			out, kind = vertexColours, "application/json; charset=UTF-8"
+		}
+		if strings.HasSuffix(r.URL.Path, "/endpoints/openapi/chat/completions") {
+			// a partner model, on Google's OpenAI-compatible chat completions
+			out = vertexPartnerStream
+			if m["stream"] != true {
+				out, kind = vertexPartnerWhole, "application/json"
+			}
 		}
 		if refused := vertexSigRefused(m); refused != "" {
 			code, out = http.StatusBadRequest, refused
@@ -847,5 +870,50 @@ func TestVertexRetriesOnlyForVertex(t *testing.T) {
 		if rec.Code != http.StatusBadRequest || n != 1 {
 			t.Errorf("%s: status %d after %d requests, want the 400 after one: %s", c.name, rec.Code, n, rec.Body.String())
 		}
+	}
+}
+
+// A partner model on Vertex AI (deepseek-ai/deepseek-v4.1-flash-maas) is
+// asked on Google's OpenAI-compatible chat completions at the project,
+// signed with the same minted token, its full id in the body, from a Chat
+// client, Claude Code and Codex, streamed or not, with nothing set beyond
+// the Gemini provider the user already has; a Gemini model beside it is
+// still asked at streamGenerateContent. Its effort goes as the client
+// asked: Gemini's levels (vertexEffort) are not put on it.
+func TestVertexPartnerModel(t *testing.T) {
+	v := &vertexUp{}
+	s := vertexServe(t, v, vertexLevels)
+	const want = "/v1/projects/proj-1/locations/global/endpoints/openapi/chat/completions"
+	const model = "google-vertex/deepseek-ai/deepseek-v4.1-flash-maas"
+	for _, c := range []struct{ name, path, body string }{
+		{"chat", "/v1/chat/completions", `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`},
+		{"anthropic", "/v1/messages", `{"model":"` + model + `","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`},
+		{"responses", "/v1/responses", `{"model":"` + model + `","input":"hi"}`},
+	} {
+		for _, stream := range []string{"false", "true"} {
+			n := v.count()
+			body := strings.TrimSuffix(c.body, "}") + `,"stream":` + stream + `}`
+			out := vertexAsk(t, s, c.path, body)
+			a := v.last(t)
+			if v.count() != n+1 || a.path != want || a.auth != "Bearer ya29.vertex-test" || a.body["model"] != "deepseek-ai/deepseek-v4.1-flash-maas" {
+				t.Errorf("%s stream %s: asked %d times, at %s with %q, model %v", c.name, stream, v.count()-n, a.path, a.auth, a.body["model"])
+			}
+			if _, gemini := a.body["contents"]; gemini {
+				t.Errorf("%s stream %s: sent a Gemini body: %v", c.name, stream, a.body)
+			}
+			if !strings.Contains(out, "Hello") || !strings.Contains(out, "DeepSeek") {
+				t.Errorf("%s stream %s: client given %s", c.name, stream, out)
+			}
+		}
+	}
+	vertexAsk(t, s, "/v1/chat/completions", `{"model":"google-vertex/gemini-3.8-flash","messages":[{"role":"user","content":"hi"}]}`)
+	if a := v.last(t); a.path != "/v1/projects/proj-1/locations/global/publishers/google/models/gemini-3.8-flash:streamGenerateContent" {
+		t.Errorf("Gemini asked at %s", a.path)
+	}
+	// translated from Codex's Responses, where Gemini's levels (low to
+	// high when a model's own aren't known) would be put on it
+	vertexAsk(t, s, "/v1/responses", `{"model":"`+model+`","reasoning":{"effort":"xhigh"},"input":"hi"}`)
+	if a := v.last(t); a.path != want || a.body["reasoning_effort"] != "xhigh" {
+		t.Errorf("effort xhigh sent at %s as %v", a.path, a.body["reasoning_effort"])
 	}
 }

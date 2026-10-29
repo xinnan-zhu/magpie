@@ -2,20 +2,15 @@
 // Keep --font and --code as the platform/theme fallbacks: an explicit
 // choice is a separate variable, including on Omarchy's body. A browser
 // tab's choice is its own (it may be on another computer), from the
-// families it draws (here).
+// families it draws (webfonts.js).
 window.desktopFonts = (() => {
-  let catalogue = null, held = null, ctx;
+  let catalogue = null, held = null;
   const web = window.bootPrefs?.web, KEY = "magpie.fonts";
   const own = () => { try { return JSON.parse(localStorage[KEY]); } catch { return held; } };
   function keep(key, v) {
     held = { ...own(), [key]: v };
     try { localStorage[KEY] = JSON.stringify(held); } catch {}
     apply();
-  }
-  function here(list) {
-    ctx ||= document.createElement("canvas").getContext("2d");
-    const w = (f) => (ctx.font = "72px " + f, ctx.measureText("mmmlli WwQ@ 0123 中文").width), bases = ["monospace", "serif"];
-    return list.filter((f) => bases.some((b) => w(quoted(f.name) + "," + b) !== w(b)));
   }
   const same = (a, b) => !!a && !!b && ["family", "name", "weight", "style", "stretch"].every((k) => a[k] === b[k]);
   const available = (face) => !face || catalogue === null || catalogue.some((f) => f.styles.some((s) => same(s, face)));
@@ -42,6 +37,6 @@ window.desktopFonts = (() => {
     // a wider font widens the tabs too: the header is fitted again (kiwiflysky on X)
     window.fitTop?.();
   }
-  return { apply, available, same, own, keep, here, catalogue: (list) => { catalogue = list; } };
+  return { apply, available, same, own, keep, quoted, catalogue: (list) => { catalogue = list; } };
 })();
 window.desktopFonts.apply(window.bootPrefs);

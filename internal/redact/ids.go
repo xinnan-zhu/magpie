@@ -52,13 +52,20 @@ func noIDs(s string, found []span) []span {
 		case ByModel:
 			// a key the model found in prose: 32 hex digits it calls a
 			// secret ("the api key is 9f8e…"); never a UUID or an element
-			// token
-			return f.kind != "SECRET" || uuidRe.MatchString(s[l:r]) || elementToken(s, l, r)
+			// token, nor a field's value whose name is not a credential's
+			// ("key", cacheKey)
+			return f.kind != "SECRET" || uuidRe.MatchString(s[l:r]) || elementToken(s, l, r) ||
+				len(fieldWords(s, l)) > 0 && !credentialField(s, l) || nameOfField(s, l, r)
 		case ByRule:
 			switch f.kind {
 			case "PASSWORD", "API_KEY", "TOKEN", "PRIVATE_KEY":
 				return false
 			case "SECRET":
+				// a short digest after a key's name in a sentence (密钥为
+				// 5d41402abc4b2a76) is that key; in a field, as a long id
+				if digestShaped(s[l:r]) && len(fieldWords(s, l)) == 0 {
+					return false
+				}
 				return !credentialField(s, l)
 			}
 		}
@@ -91,7 +98,33 @@ func idAround(s string, a, b int) (l, r int, ok bool) {
 		!idShaped(s[l:r]) {
 		return 0, 0, false
 	}
+	// a short digest is a word of its own, not the hex end of a longer
+	// one (a key's sk_…deadbeef…)
+	if digestShaped(s[l:r]) && (l > 0 && wordByte(s[l-1]) || r < len(s) && wordByte(s[r])) {
+		return 0, 0, false
+	}
 	return l, r, true
+}
+
+// nameOfField says s[l:r] is a field's name, not its value: a JSON
+// object's key ({"5d41402abc4b2a76": {…}}), as data keyed by a hash has
+// it. A name is never a secret.
+func nameOfField(s string, l, r int) bool {
+	if l == 0 || s[l-1] != '"' {
+		return false
+	}
+	i := r
+	if i < len(s) && s[i] == '\\' {
+		i++
+	}
+	if i >= len(s) || s[i] != '"' {
+		return false
+	}
+	i++
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i < len(s) && s[i] == ':'
 }
 
 // elementToken says s[a:b] is an element token, or its snapshot's part
@@ -138,9 +171,40 @@ func hexOrHyphen(c byte) bool {
 }
 
 // idShaped says v, hex digits and hyphens, is a UUID or 32 hex digits or
-// more without a hyphen.
+// more without a hyphen, or a shorter digest (digestShaped).
 func idShaped(v string) bool {
-	return uuidRe.MatchString(v) || len(v) >= 32 && !strings.Contains(v, "-")
+	return uuidRe.MatchString(v) || len(v) >= 32 && !strings.Contains(v, "-") || digestShaped(v)
+}
+
+// digestShaped says v is a hash's hex digits short of 32: 16 to 31 of
+// them in one case, letters and digits both, as a short commit, a 64-bit
+// hash (xxhash, a cache's key) or a truncated sha256 is written
+// (5d41402abc4b2a76). Data keyed by one went to the vendor as
+// {{SECRET_…}} under "key", cacheKey or "token_hash", and a phone's form
+// in the middle of one (9f13800138000abc) as half a placeholder (_kaichen
+// on X, 10-28). Digits alone are a number's, a card's or a phone's.
+func digestShaped(v string) bool {
+	if len(v) < 16 || len(v) >= 32 {
+		return false
+	}
+	var lower, upper, digits int
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c >= '0' && c <= '9':
+			digits++
+		case c >= 'a' && c <= 'f':
+			lower++
+		case c >= 'A' && c <= 'F':
+			upper++
+		default:
+			return false
+		}
+	}
+	// a hash's digits are random: of 16, about 6 are letters and 10
+	// digits. Two letters among digits are an IBAN's (DE89370400…) or a
+	// code's, not a hash's.
+	letters := lower + upper
+	return (lower == 0 || upper == 0) && letters >= max(3, len(v)/8) && digits >= max(3, len(v)/8)
 }
 
 // credentialField says the field whose value starts at s[at] is named for
@@ -149,6 +213,9 @@ func idShaped(v string) bool {
 // bare "key".
 func credentialField(s string, at int) bool {
 	words := fieldWords(s, at)
+	if len(words) == 1 && words[0] == "key" && keyPhrase(s, at) {
+		return true // api key: …, Secret Key = …
+	}
 	if len(words) < 2 && (len(words) == 0 || words[0] == "key") || elementField(words) {
 		return false
 	}
@@ -159,11 +226,32 @@ func credentialField(s string, at int) bool {
 	for _, w := range words {
 		switch w {
 		case "page", "next", "cursor", "continuation", "csrf", "xsrf", "trace", "request", "idempotency", "sync", "nonce",
-			"hash", "digest", "checksum", "sha", "fingerprint", "etag":
+			"hash", "digest", "checksum", "sha", "fingerprint", "etag",
+			// a key for finding data, not for getting in: cache_key,
+			// cacheKey, object_key, dedupe_key
+			"cache", "commit", "object", "blob", "file", "content", "revision", "rev", "partition", "shard", "bucket", "dedup", "dedupe", "lookup", "row", "sort":
 			return false
 		}
 	}
 	return true
+}
+
+// keyPhrase says the bare key whose value starts at s[at] is the second
+// word of a credential's name in words: api key, access key, secret key,
+// private key.
+func keyPhrase(s string, at int) bool {
+	before := strings.ToLower(s[max(0, at-24):at])
+	i := strings.LastIndex(before, "key")
+	if i < 0 {
+		return false
+	}
+	before = strings.TrimRight(before[:i], " ")
+	for _, w := range []string{"api", "access", "secret", "private", "signing", "license", "licence"} {
+		if strings.HasSuffix(before, w) && (len(before) == len(w) || !wordByte(before[len(before)-len(w)-1])) {
+			return true
+		}
+	}
+	return false
 }
 
 // fieldWords are the words of the name of the field whose value starts at

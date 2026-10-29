@@ -21,7 +21,10 @@ import (
 // It is written wherever a terminal runs magpie from: when the app's
 // folder is on PATH, where Settings › Command line puts it, or a magpie.com
 // or magpie.cmd is there already. The app writes it again as it starts
-// when its bytes differ, so an update brings it along.
+// when its bytes differ, so an update brings it along. They differ only
+// when the launcher does: it is built without the release's commit in it
+// (the Makefile's -buildvcs=false), or every update wrote a new magpie.com
+// (lucky_eagle_38410 on Discord, TestLauncherSameAtEveryCommit).
 
 // ComEnv is set by magpie.com for the app it runs: the standard handles it
 // hands over are the terminal's console or a redirection, and its console

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/probelog"
@@ -42,6 +44,30 @@ const (
 	WorkDirHeader = "X-Magpie-Work-Dir"
 	WorkGitHeader = "X-Magpie-Work-Git"
 )
+
+// FallbackHeader, "1", tells a plugin's fetch that magpie needn't have the
+// answer waited for: a request its vendor queues (Qoder's free models)
+// comes back at once with the queue's 503 and Retry-After instead of being
+// waited out for minutes. Without it the plugin waits. A model's test
+// sends it, so a queued model's test says it is queued instead of running
+// out of time. The plugin host takes it off whatever the plugin sends on
+// (host.js), as it does the two above.
+const FallbackHeader = "X-Magpie-Fallback"
+
+// warmPlugin starts p's plugin host and runs its account's loader, which
+// may renew the sign-in, under ctx and through the account's proxy: what
+// a plugin's first fetch waits for besides its vendor. A failure is left
+// for the fetch to meet and say.
+func (p Provider) warmPlugin(ctx context.Context) {
+	if !p.IsPlugin() {
+		return
+	}
+	id := p.Account.plugin.ID
+	if cur, ok := PluginOf(p.ID); ok {
+		id = cur.ID
+	}
+	_, _ = plugin.LoaderOptions(p.Via(ctx), id, p.Account.pluginKey)
+}
 
 // PluginID is the id magpie gives the provider OpenCode calls id: the same,
 // unless a preset or a built-in subscription has it (google, openai,
@@ -619,11 +645,48 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 // clears the mark.
 const SignInHeader = "X-Magpie-Sign-In"
 
+// ModelUnserved are how a vendor says the model isn't one it serves this
+// key, or this way — words another provider, or key, may not answer with
+// (the gateway's unservedWords, read decoded: catalog.Words).
+var ModelUnserved = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
+
+// signInWords are words of a refusal about the sign-in itself, which a
+// model named beside them doesn't make the model's: "model gpt-x: invalid
+// token" is the token.
+var signInWords = regexp.MustCompile(`(?i)token|api.?key|credential|sign.?in|log.?in|expired|session|令牌|密钥|登录|过期`)
+
+// modelOnly401 says a 401 a plugin answered without SignInHeader is about
+// the model, not the account's sign-in: its body says the model isn't
+// served (ModelUnserved) and nothing of the sign-in. A plugin answering
+// "this model isn't available to you" with 401 marked every account the
+// request failed over to as needing a new sign-in (plugins#468), for a
+// credential that was fine. Only the start of the body is read, and given
+// back whole for the gateway to read as before.
+func modelOnly401(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusUnauthorized || resp.Body == nil {
+		return false
+	}
+	head, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), resp.Body), resp.Body}
+	if err != nil || len(head) == 0 {
+		return false
+	}
+	words := catalog.Words(head)
+	return ModelUnserved.Match(words) && !signInWords.Match(words)
+}
+
 // notePluginSignIn marks or clears an account's lapse as the plugin's
-// answer says, and takes SignInHeader off it.
+// answer says, and takes SignInHeader off it. A 401 it says nothing of
+// that is about the model alone leaves the account as it is (kept).
 func notePluginSignIn(pp plugin.Provider, account string, resp *http.Response) {
 	said := strings.ToLower(strings.TrimSpace(resp.Header.Get(SignInHeader)))
 	resp.Header.Del(SignInHeader)
+	if said == "" && modelOnly401(resp) {
+		said = "kept"
+	}
 	notePluginSaid(pp, account, said, resp.StatusCode)
 }
 
@@ -681,9 +744,13 @@ func modelAPIID(m plugin.Model) string {
 	return m.ID
 }
 
+// withModel is body asking for model.
 func withModel(body []byte, model string) []byte {
+	if b, ok := replaceModel(body, model); ok {
+		return b
+	}
 	var v map[string]json.RawMessage
-	if json.Unmarshal(body, &v) != nil {
+	if json.Unmarshal(body, &v) != nil || v == nil {
 		return body
 	}
 	v["model"], _ = json.Marshal(model)
@@ -691,6 +758,32 @@ func withModel(body []byte, model string) []byte {
 		return b
 	}
 	return body
+}
+
+// replaceModel is body with its one top-level "model", a string, replaced
+// by model and every other byte as it came; false when body isn't JSON or
+// has no such "model". Decoding a body and marshalling it again to ask
+// a plugin for its model id allocated ten times a 45 MB request (#4004).
+func replaceModel(body []byte, model string) ([]byte, bool) {
+	if !gjson.ValidBytes(body) {
+		return nil, false
+	}
+	n := 0
+	for _, k := range gjson.GetBytes(body, "@keys").Array() {
+		if k.Str == "model" {
+			n++
+		}
+	}
+	was := gjson.GetBytes(body, "model")
+	at := was.Index
+	if n != 1 || was.Type != gjson.String || at <= 0 {
+		return nil, false
+	}
+	name, _ := json.Marshal(model)
+	out := make([]byte, 0, len(body)-len(was.Raw)+len(name))
+	out = append(out, body[:at]...)
+	out = append(out, name...)
+	return append(out, body[at+len(was.Raw):]...), true
 }
 
 func firstOf(ss ...string) string {

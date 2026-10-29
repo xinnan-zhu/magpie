@@ -55,6 +55,15 @@ type Options struct {
 	Kinds map[string]bool
 	// Model, where set, finds more in the texts to mask (model.go)
 	Model Model
+	// MinScore is the score the user has Model's finds need (Settings →
+	// Privacy's slider), which Model's own finds are held to already. A
+	// value only the model found, masked before at a lower score, isn't
+	// masked again as known under it (knownSpans).
+	MinScore float64
+	// NamesByModel says Model finds Chinese names itself (AstrLink
+	// Guard): beside it only a nickname (小王, 老李) is found by the
+	// words around it (zhNameSpans)
+	NamesByModel bool
 	// Shape sends a key as a made-up key of its form, not a placeholder
 	// (shape.go)
 	Shape bool
@@ -157,12 +166,12 @@ var rules = append([]rule{
 	{kind: "PASSWORD", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s:@/?#"'<>]*:([^\s@/?#"'<>]{3,})@`), markers: []string{"://"}, ok: notAVariable},
 	// password = …, API_KEY: "…", as .env files and configs have them
 	{kind: "SECRET", re: regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:` + secretNames.pattern() + `)[A-Za-z0-9_.-]*` + quote + `[ \t]*[:=][ \t]*` + quote + `(` + secretCh + `{8,})`),
-		markers: secretNames.markers(), ok: secretValue, at: notCode},
+		markers: secretNames.markers(), ok: secretValue, at: fieldAt},
 	// a field called key and nothing more, as providers.json has one: "key":
 	// "oc_sk_…" (#195). Only a long value of letters and digits both, since
 	// code calls anything a key: a map's "key": "value", sort_key, keyboard.
 	{kind: "SECRET", re: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])` + quote + `key` + quote + `[ \t]*[:=][ \t]*` + quote + `(` + secretCh + `{16,})`),
-		markers: fieldNames{{"key", "key"}}.markers(), ok: secretValue, at: notCode},
+		markers: fieldNames{{"key", "key"}}.markers(), ok: secretValue, at: fieldAt},
 	// a password after its name in Chinese, Japanese or Korean, as people
 	// write one into a message: 密码：786kih, 密碼是 hunter2, パスワード: … .
 	// Unlike password = in a config, nothing in code is called 密码, so
@@ -183,8 +192,8 @@ var rules = append([]rule{
 
 	{kind: "EMAIL", re: regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`), markers: []string{"@"}, bound: alnum + "_%+-", ok: realEmail, at: emailAt, cat: catPersonal},
 	{kind: "ID_CARD", re: regexp.MustCompile(`[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]`), bound: alnum, ok: chineseID, cat: catPersonal},
-	{kind: "PHONE", re: regexp.MustCompile(`(?:\+?86[- ]?)?1[3-9]\d{9}`), bound: digits, cat: catPersonal},
-	{kind: "BANK_CARD", re: regexp.MustCompile(`[3-6]\d{3}(?:[ -]?\d{4}){2,3}(?:[ -]?\d{1,3})?`), bound: digits, ok: luhn, cat: catPersonal},
+	{kind: "PHONE", re: regexp.MustCompile(`(?:\+?86[- ]?)?1[3-9]\d{9}`), bound: alnum, at: phoneAt, cat: catPersonal},
+	{kind: "BANK_CARD", re: regexp.MustCompile(`[3-6]\d{3}(?:[ -]?\d{4}){2,3}(?:[ -]?\d{1,3})?`), bound: alnum, ok: luhn, cat: catPersonal},
 }, moreRules...)
 
 // cjkPasswordNames are what a password is called in Chinese, Japanese and
@@ -292,6 +301,11 @@ func keyValue(v string) bool {
 // time.
 func keyAt(s string, a, b int) bool {
 	v := s[a:b]
+	if pathValue(v) || versionValue(v) {
+		// where a key is kept: 私钥 ~/.ssh/id_ed25519, or a release's
+		// version: token 是 0.15.0-rc1 (fieldvalue.go)
+		return false
+	}
 	if keyValue(v) {
 		return true
 	}
@@ -429,6 +443,9 @@ func realEmail(v string) bool {
 		return false
 	}
 	host := strings.ToLower(v[at+1:])
+	if !mailHost(v[:at], host) {
+		return false
+	}
 	if fileHost(host) || docFiles[host] || !mailTLD(host[strings.LastIndexByte(host, '.')+1:]) {
 		return false
 	}
@@ -439,6 +456,34 @@ func realEmail(v string) bool {
 	}
 	return !strings.HasPrefix(host, "noreply") && !strings.Contains(v, "noreply@")
 }
+
+// mailHost is whether host, after local and an @, can be a mail domain:
+// it has a dot, labels of letters, digits and hyphens (or a name's own
+// script's: 例子.中国), and is not a
+// linker's table; and local has no @ of its own. A disassembly's symbols
+// read as addresses: system@plt, puts@got.plt, a version after one @ or
+// two (memcpy@GLIBC_2.14, foo@@GLIBC_2.2.5, foo@Base). .got is a
+// top-level domain, and the local model took system@got for an email, so
+// a reverse engineer had to turn masking off (ch35tnut_ on X, 10-28).
+func mailHost(local, host string) bool {
+	if strings.HasSuffix(local, "@") || !strings.Contains(host, ".") || strings.Trim(host, ".") != host {
+		return false
+	}
+	linker := true
+	for _, l := range strings.Split(host, ".") {
+		if l == "" || strings.ContainsFunc(l, func(r rune) bool { return r < 0x80 && r != '-' && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') }) {
+			return false
+		}
+		if !linkerWords[l] {
+			linker = false
+		}
+	}
+	return !linker
+}
+
+// linkerWords are the names of a binary's tables a symbol is reached
+// through (system@plt, puts@got.plt, foo@plt.sec), no domain's labels.
+var linkerWords = map[string]bool{"plt": true, "got": true, "sec": true, "iplt": true, "igot": true}
 
 // docFiles are the files agents read by name, on a domain's ending
 // (.md): "@AGENTS.md" after a word, as a prompt names one, is no address
@@ -634,9 +679,9 @@ func makeRoom() {
 // its form (Shape).
 func (o Options) put() func(kind, v string) string {
 	if o.Shape {
-		return shaped
+		return standIn(shaped)
 	}
-	return placeholder
+	return standIn(placeholder)
 }
 
 // ---- masking --------------------------------------------------------------------
@@ -644,7 +689,11 @@ func (o Options) put() func(kind, v string) string {
 type span struct {
 	start, end int
 	kind       string
-	by         string // which finder found it: one of the By constants
+	by         string  // which finder found it: one of the By constants
+	score      float64 // the model's score for one it found, else 0
+	// bare: a whole bare value of JSON text (inStrings), whose
+	// placeholder goes in quoted
+	bare bool
 }
 
 // Which finder found a value (Hit.By): magpie's rules, the user's own
@@ -779,7 +828,8 @@ func Mask(s string, o Options) (string, int) {
 }
 
 // Preview is Mask with nothing remembered: each value goes as the
-// placeholder, or with Options.Shape the made-up key, it would have, which
+// placeholder, or with Options.Shape the made-up key, it would have (a
+// user name its made-up name, an IP address its documentation one), which
 // isn't kept for Restore or as a value seen before (known.go).
 func Preview(s string, o Options) string {
 	put := tag
@@ -791,6 +841,18 @@ func Preview(s string, o Options) string {
 			}
 			return tag(kind, v)
 		}
+	}
+	tagOrShape := put
+	put = func(kind, v string) string {
+		if kind == "USERNAME" {
+			return standInOf(v) // a user name's made-up name (shape.go)
+		}
+		if kind == "IP" {
+			if at, _, ok := ipStandIns(v); ok {
+				return at(0) // an address's documentation one (shape.go)
+			}
+		}
+		return tagOrShape(kind, v)
 	}
 	out, _ := mask(s, withModel(o, []string{s}), put, false)
 	return out
@@ -854,7 +916,7 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 				i = a + max(n, 1)
 				continue
 			}
-			found = append(found, span{a, b, "TERM", ByWord})
+			found = append(found, span{a, b, "TERM", ByWord, 0, false})
 			i = max(b, a+1)
 		}
 	}
@@ -889,12 +951,12 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 				took := false
 				for g, kind := range r.groups {
 					if a, b := m[2*g+2], m[2*g+3]; a >= 0 && r.takes(s, a, b, r.groupOK[g]) {
-						found = append(found, span{a, b, kind, r.by()})
+						found = append(found, span{a, b, kind, r.by(), 0, false})
 						took = true
 					}
 				}
 				if took {
-					split = append(split, span{m[2], m[1], "", ""})
+					split = append(split, span{m[2], m[1], "", "", 0, false})
 				}
 				continue
 			}
@@ -917,7 +979,7 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 				ok = nil
 			}
 			if r.takes(s, a, b, ok) {
-				found = append(found, span{a, b, r.kind, r.by()})
+				found = append(found, span{a, b, r.kind, r.by(), 0, false})
 			}
 		}
 	}
@@ -935,9 +997,13 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 		found = append(found, knownSpans(s, o)...)
 	}
 	if escaped {
-		found = outsideEscapes(raw, found)
+		found = inStrings(raw, outsideEscapes(raw, found))
 	}
-	return apply(raw, noNumbers(s, noIDs(s, found)), put, o)
+	found = noNumbers(s, noIDs(s, found))
+	if o.sent {
+		noteScores(raw, found) // what is masked for a vendor, not a preview
+	}
+	return apply(raw, found, put, o)
 }
 
 // unescapedView is s, JSON text, as long as s and read as the vendor reads
@@ -1034,6 +1100,83 @@ func outsideEscapes(s string, found []span) []span {
 		}
 	}
 	return out
+}
+
+// inStrings is found, for s JSON text (a tool call's arguments), with
+// each value inside the one string it starts in: cut at that string's
+// closing quote, or started at the first string inside it. A value that
+// is a whole bare value (a number under "password":) is kept, and its
+// placeholder goes in quoted (span.bare); one in nothing else, across a
+// key's quotes, a colon or a brace, goes. Masked over the quote, the
+// arguments were JSON no longer: the local model reads a password's ! and
+// the "} after it as one token, and {"cmd":"export DB_PASSWORD=Hunt3r!"}
+// went as {"cmd":"export DB_PASSWORD={{SECRET_…}}}; a user's rule
+// tok-\S+ took the "} too. The vendor turned away every turn that
+// replayed the call, and Codex reconnected over and over
+// (xiaojiang091499 on X). Every finder's values go through here, as
+// through outsideEscapes. Text that isn't JSON is left as it is.
+func inStrings(s string, found []span) []span {
+	if len(found) == 0 || !json.Valid([]byte(s)) {
+		return found
+	}
+	// in[i] is 1 + which string literal byte i is the text of, 0 for one
+	// outside every string (its quotes among them)
+	in := make([]int32, len(s))
+	n := int32(0)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '"' {
+			continue
+		}
+		n++
+		j := i + 1
+		for ; j < len(s) && s[j] != '"'; j++ {
+			in[j] = n
+			if s[j] == '\\' && j+1 < len(s) {
+				j++
+				in[j] = n
+			}
+		}
+		i = j
+	}
+	out := found[:0]
+	for _, f := range found {
+		a := f.start
+		for a < f.end && in[a] == 0 {
+			a++
+		}
+		if a == f.end {
+			if bareValue(s, f.start, f.end) {
+				f.bare = true
+				out = append(out, f)
+			}
+			continue
+		}
+		b := a
+		for b < f.end && in[b] == in[a] {
+			b++
+		}
+		f.start, f.end = a, b
+		out = append(out, f)
+	}
+	return out
+}
+
+// bareValue says s[a:b], JSON text outside its strings, is all of one
+// bare value: an object's (after :) or an array's (after [ or ,), with
+// the , } or ] that ends it after it.
+func bareValue(s string, a, b int) bool {
+	if a >= b || strings.ContainsAny(s[a:b], " \t\r\n{}[]\",:") {
+		return false
+	}
+	i := a - 1
+	for i >= 0 && isSpace(s[i]) {
+		i--
+	}
+	k := b
+	for k < len(s) && isSpace(s[k]) {
+		k++
+	}
+	return i >= 0 && strings.IndexByte(":[,", s[i]) >= 0 && (k == len(s) || strings.IndexByte(",}]", s[k]) >= 0)
 }
 
 // noNumbers is found without what is a piece of a decimal number of s:
@@ -1250,7 +1393,11 @@ func apply(s string, found []span, put func(kind, v string) string, o Options) (
 		}
 		b.WriteString(s[last:f.start])
 		h.Placeholder = put(f.kind, v)
-		b.WriteString(h.Placeholder)
+		if f.bare {
+			b.WriteString(`"` + h.Placeholder + `"`)
+		} else {
+			b.WriteString(h.Placeholder)
+		}
 		if o.Seen != nil {
 			o.Seen(h)
 		}

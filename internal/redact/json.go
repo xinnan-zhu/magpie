@@ -386,11 +386,21 @@ func MaskJSON(body []byte, o Options) ([]byte, int) {
 	masked := func(path, key, s string) bool {
 		return !keepIn(path, key, s, args, defs) && (signed == nil || !under(path, signed))
 	}
+	// What the agent defines (its tools' and schemas' descriptions) is
+	// masked by the rules alone, as with the model off: it is the agent's
+	// or a tool server's text, the same in every request, and no one's
+	// conversation. Read by the model it was most of a request's text,
+	// 52,577 of Claude Code 2.1.296's 67,532 bytes, and on a 4-core
+	// server the first request waited out the gateway's 2 minutes while
+	// the model read it (niuniu_8964 on X); on three real Claude Code
+	// requests the model masked nothing there the rules didn't.
+	defsO := o
+	defsO.Model = nil
 	if o.Model != nil {
 		// the model is asked once, for all of the request's texts
 		var texts []string
 		if _, ok := walk(body, func(path, key, s string) string {
-			if masked(path, key, s) {
+			if masked(path, key, s) && !under(path, defs) {
 				texts = append(texts, s)
 			}
 			return s
@@ -405,14 +415,26 @@ func MaskJSON(body []byte, o Options) ([]byte, int) {
 		seen = append(seen, v, p)
 		return p
 	}
+	// the definitions after the rest, so a value the model found in what
+	// is said is masked in them too, as known
 	out, ok := walk(body, func(path, key, s string) string {
-		if !masked(path, key, s) {
+		if !masked(path, key, s) || under(path, defs) {
 			return s
 		}
 		t, n := mask(s, o, put, asJSON(key, ""))
 		total += n
 		return t
 	})
+	if ok && len(defs) > 0 {
+		out, ok = walk(out, func(path, key, s string) string {
+			if !masked(path, key, s) || !under(path, defs) {
+				return s
+			}
+			t, n := mask(s, defsO, put, asJSON(key, ""))
+			total += n
+			return t
+		})
+	}
 	if !ok {
 		t, n := Mask(string(body), o)
 		return []byte(t), n
@@ -474,6 +496,23 @@ func asJSON(key, eventType string) bool {
 	return key == "arguments" || key == "partial_json" || key == "delta" && strings.Contains(eventType, "arguments")
 }
 
+// typeOf is the type a JSON object says it is, wherever its "type" is
+// among its keys. Read as the keys came, a Responses
+// function_call_arguments.delta whose "delta" came before its "type", as
+// a Go map writes them, had its value put back unescaped: a password
+// with a quote in it ended the arguments' string there, and the arguments
+// the agent put together were JSON no longer.
+func typeOf(data []byte) string {
+	typ := ""
+	walk(data, func(path, _, s string) string {
+		if path == "type" {
+			typ = s
+		}
+		return s
+	})
+	return typ
+}
+
 // RestoreJSON puts the values back in a response body.
 func RestoreJSON(body []byte) []byte { return restoreJSON(body, nil) }
 
@@ -482,11 +521,8 @@ func restoreJSON(body []byte, put map[string]int) []byte {
 	if !bytes.Contains(body, []byte("{{")) && !hasShapes(body) {
 		return body
 	}
-	typ := ""
+	typ := typeOf(body)
 	out, ok := walk(body, func(path, key, s string) string {
-		if path == "type" {
-			typ = s
-		}
 		return restore(s, asJSON(key, typ), put)
 	})
 	if !ok {

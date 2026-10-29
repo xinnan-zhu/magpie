@@ -77,6 +77,14 @@ type Model struct {
 	// provider after it (magpie_label): the name Provider in model names
 	// Off has here (ARNO on Discord).
 	Plain string `json:",omitempty"`
+	// Apart, in a list magpie hands Codex, is what tells the model from
+	// another entry Codex's picker would call the same (two providers
+	// named Codex each serving GPT-6.1-Sol, nb5p on Discord): its
+	// provider's id. Said in the entry's display_name alone
+	// (codexcat.Entries), which stays in Codex's picker; never in its
+	// description or Name, which go upstream in spawn_agent's list of
+	// models. Kept in the list's tag, so a change has Codex ask again.
+	Apart string `json:",omitempty"`
 	// Fast is set on a model Codex may ask for priority processing (its
 	// Fast mode): one a ChatGPT account serves.
 	Fast bool `json:",omitempty"`

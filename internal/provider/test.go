@@ -70,6 +70,12 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
+		if p.IsVertex() && proto == Chat {
+			// a partner model answers only once the project has turned it
+			// on in Model Garden: the provider is tested on Gemini, and a
+			// partner model by its own test (TestModel)
+			continue
+		}
 		q, ok := p.keyFor(proto)
 		model := p.testModel(q, proto)
 		if !ok {
@@ -192,7 +198,7 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 		if q.IsBedrock() || q.IsAzure() {
 			return q.mantleBase(q.Chat, model) + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}`, model)
 		}
-		return q.Chat + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
+		return q.Base(Chat) + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 	case Responses:
 		return q.mantleBase(q.Responses, model) + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
 	case Anthropic:
@@ -211,10 +217,16 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 }
 
 // testWait is how long a probe waits for an answer; drawWait, for a
-// picture, which takes an images API longer than a word takes chat.
-const (
-	testWait = 20 * time.Second
-	drawWait = 2 * time.Minute
+// picture, which takes an images API longer than a word takes chat;
+// pluginTestWait, for a plugin's provider, whose fetch may renew the
+// sign-in or ask its vendor more than once before it answers, as it does
+// for the gateway, which gives it no such bound (mingxia_16024 on
+// Discord: every Qoder and WorkBuddy model's test ended at 20s while
+// agents were answered).
+var (
+	testWait       = 20 * time.Second
+	drawWait       = 2 * time.Minute
+	pluginTestWait = time.Minute
 )
 
 // drawsOnImages is whether model is asked on p's images API, as the
@@ -547,6 +559,14 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		r.Error = "no model to try: expose one, or refresh the model list"
 		return r
 	}
+	if p.IsPlugin() {
+		// the plugin host started and the account's loader run (a
+		// sign-in renewed) under the caller's time, as a warm host
+		// answers the gateway, not the probe's: a cold host took the
+		// whole of it (mingxia_16024)
+		p.warmPlugin(ctx)
+		wait = max(wait, pluginTestWait)
+	}
 	ctx, cancel := context.WithTimeout(probelog.WithModel(ctx, model), wait)
 	defer cancel()
 	rctx := ctx
@@ -574,6 +594,11 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	}
 	if client := testClient(ctx); client != "" {
 		clientHeaders(client, req.Header)
+	}
+	if p.IsPlugin() {
+		// a model its vendor has queued is said so at once, not waited
+		// out for minutes as an agent's turn is (Qoder's free models)
+		req.Header.Set(FallbackHeader, "1")
 	}
 	if err := p.Sign(ctx, req, proto, body); err != nil {
 		r.Error = err.Error()
@@ -925,10 +950,13 @@ func apiError(b []byte, fallback string) string {
 		return fallback
 	}
 	// a body in no shape known is shown as it is, cut short, so what the
-	// vendor said isn't lost; other markup says nothing worth showing
+	// vendor said isn't lost; other markup (an XML error, a page's
+	// fragment) by its words, its tags taken out
 	s := strings.Join(strings.Fields(string(b)), " ")
 	if strings.HasPrefix(s, "<") {
-		return fallback
+		if s = MarkupText(b); s == "" {
+			return fallback
+		}
 	}
 	if r := []rune(s); len(r) > 300 {
 		s = string(r[:300]) + "…"
@@ -1001,5 +1029,29 @@ func WebPage(b []byte) (string, bool) {
 	if title := PageTitle(t); title != "" {
 		return "a web page, not an API reply: “" + title + "”", true
 	}
+	// one with no title by its words, which may say why (a relay's "only
+	// … clients are allowed"), cut as a title is
+	if said := MarkupText(t); said != "" {
+		if r := []rune(said); len(r) > 120 {
+			said = string(r[:120]) + "…"
+		}
+		return "a web page, not an API reply: “" + said + "”", true
+	}
 	return "a web page, not an API reply", true
+}
+
+// unshown is markup whose words aren't a reader's: a script, a style
+// sheet, a comment, an XML declaration.
+var unshown = regexp.MustCompile(`(?is)<script[^>]*>.*?</script\s*>|<style[^>]*>.*?</style\s*>|<!--.*?-->|<\?.*?\?>|<!doctype[^>]*>`)
+
+// MarkupText is the words markup holds, as plain words: scripts, styles
+// and comments out, then every tag, entities read, whitespace folded, cut
+// to 300 runes. "" when it holds none.
+func MarkupText(b []byte) string {
+	s := unshown.ReplaceAllString(string(b), " ")
+	s = strings.Join(strings.Fields(html.UnescapeString(tagRe.ReplaceAllString(s, " "))), " ")
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "…"
+	}
+	return s
 }

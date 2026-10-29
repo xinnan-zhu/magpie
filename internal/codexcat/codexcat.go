@@ -99,10 +99,11 @@ func Catalog(ms []catalog.Model) []byte { return CatalogAt(ms, NewSessionEffort(
 func CatalogAt(ms []catalog.Model, effort string) []byte { return CatalogUsed(ms, effort, nil) }
 
 // CatalogUsed is CatalogAt with the models Codex used, most recent first,
-// kept where the Codex app reads them (Fit).
+// and a ChatGPT account's own (ChatGPTOwn), kept where the Codex app reads
+// them (FitOwn).
 func CatalogUsed(ms []catalog.Model, effort string, used []string) []byte {
 	entries := entriesAt(ms, 0, effort)
-	Fit(entries, used)
+	FitOwn(entries, used, ChatGPTOwn)
 	out := struct {
 		Models []any `json:"models"`
 	}{Models: entries}
@@ -112,6 +113,12 @@ func CatalogUsed(ms []catalog.Model, effort string, used []string) []byte {
 	b, _ := json.MarshalIndent(out, "", " ")
 	return b
 }
+
+// ChatGPTOwn reports whether slug is a ChatGPT account's own model in
+// magpie's list for Codex (codex/<slug>): Codex's own GPT models, for a
+// Codex that reaches them through magpie, which FitOwn keeps in the first
+// AppList.
+func ChatGPTOwn(slug string) bool { return strings.HasPrefix(slug, "codex/") }
 
 // level, tier and model are an entry of models.json as Entries writes it.
 type level struct {
@@ -205,7 +212,7 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 	var entries []any
 	for i, m := range ms {
 		if raw, ok := own[strings.TrimPrefix(m.ID, "codex/")]; ok && strings.HasPrefix(m.ID, "codex/") {
-			e := ownEntry(raw, m.ID, m.Name, after+i+1)
+			e := ownEntry(raw, m.ID, shownName(m), after+i+1)
 			// the window as magpie resolves it — the one the user set,
 			// else the account's list's — not the cache's, which is what
 			// magpie last handed Codex (#674)
@@ -222,7 +229,7 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			continue
 		}
 		e := model{
-			Slug: m.ID, DisplayName: m.Name, Description: m.Name + " via magpie",
+			Slug: m.ID, DisplayName: shownName(m), Description: m.Name + " via magpie",
 			Instructions: Prompt, Efforts: []level{},
 			Shell: "unified_exec", Visibility: "list", InAPI: true, Priority: after + i + 1,
 			ApplyPatch: "freeform", Tools: []string{}, Modalities: []string{"text"},
@@ -561,7 +568,15 @@ const AppList = 100
 // order they stood, in place of the last of the others there. The order
 // is otherwise kept, and the priorities numbered 1 to n in it. The slice
 // is put in that order too.
-func Fit(entries []any, used []string) {
+func Fit(entries []any, used []string) { FitOwn(entries, used, nil) }
+
+// FitOwn is Fit with Codex's own models (own reports them by slug) kept
+// in the first AppList ahead of the ones used, wherever the user's order
+// (Order) put them: Codex lists them itself, so a user who didn't take
+// them out of its list expects them in the app. An order set while the
+// list had none of them names only magpie's, and put every one past the
+// 100th (maiya on Discord). A hidden one still goes last.
+func FitOwn(entries []any, used []string, own func(slug string) bool) {
 	type ranked struct {
 		e        any
 		slug     string
@@ -603,7 +618,17 @@ func Fit(entries []any, used []string) {
 			listed++
 		}
 	}
-	if listed > AppList && len(used) > 0 {
+	if listed > AppList && (len(used) > 0 || own != nil) {
+		n := 0
+		// Codex's own first, then the used ones, as room allows
+		if own != nil {
+			for i := range rs[:listed] {
+				if n < AppList && own(rs[i].slug) {
+					rs[i].promoted = true
+					n++
+				}
+			}
+		}
 		at := map[string]int{}
 		for i, r := range rs[:listed] {
 			at[r.slug] = i
@@ -613,7 +638,6 @@ func Fit(entries []any, used []string) {
 				at["codex/"+r.slug] = i
 			}
 		}
-		n := 0
 		for _, u := range used {
 			if i, ok := at[u]; ok && !rs[i].promoted && n < AppList {
 				rs[i].promoted = true
@@ -832,6 +856,17 @@ func ownEntry(raw map[string]any, id, name string, priority int) map[string]any 
 	return e
 }
 
+// shownName is the name Codex's picker shows m by: its Name, with what
+// tells it from another entry of that name after it (catalog.Model.Apart).
+// The picker alone shows it: the description, and the names magpie adds
+// to spawn_agent, which go upstream, keep Name.
+func shownName(m catalog.Model) string {
+	if m.Apart == "" {
+		return m.Name
+	}
+	return m.Name + " · " + m.Apart
+}
+
 // listedEntry is the entry m's vendor lists it under in Codex's own shape
 // (catalog.Model.Codex, a sub2api's), under magpie's id: as the vendor
 // gave it — its instructions, tools, truncation, tiers and the rest, which
@@ -847,7 +882,7 @@ func listedEntry(m catalog.Model, priority int, work settings.Settings, autoRevi
 	if len(m.Codex) == 0 || json.Unmarshal(m.Codex, &raw) != nil || raw == nil {
 		return nil, false
 	}
-	e := ownEntry(raw, m.ID, m.Name, priority)
+	e := ownEntry(raw, m.ID, shownName(m), priority)
 	desc, _ := e["description"].(string)
 	e["description"] = cmp.Or(strings.TrimSpace(desc), m.Name) + " via magpie"
 	if c := m.Context; c > 0 {

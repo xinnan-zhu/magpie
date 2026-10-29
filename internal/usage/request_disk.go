@@ -132,9 +132,9 @@ func diskEntry(c *rowChunk) []byte {
 		b = appendDiskString(b, name)
 		put(uint64(int64(offset)))
 	}
-	put(uint64(len(c.codexActors)))
-	for _, actor := range c.codexActors {
-		b = appendDiskString(b, actor)
+	put(uint64(c.codexActors.len()))
+	for i := range c.codexActors.len() {
+		b = appendDiskString(b, c.codexActors.at(i))
 	}
 	put(uint64(len(archive)))
 	if !readMapped(c.mapped, func() { b = append(b, archive...) }) {
@@ -213,14 +213,14 @@ func readDiskEntry(b []byte) (*rowChunk, error) {
 		if !good {
 			return nil, errDiskEntry
 		}
-		c.codexActors = append(c.codexActors, actor)
+		c.codexActors.add(actor)
 	}
 	n = take()
 	if b == nil || n != uint64(len(b)) || n == 0 {
 		return nil, errDiskEntry
 	}
 	c.Archive = b
-	c.Bytes = int64(len(b)+len(c.Locations)*8) + codexActorBytes(c.codexActors)
+	c.Bytes = int64(len(b)+len(c.Locations)*8) + c.codexActors.bytes()
 	return c, nil
 }
 

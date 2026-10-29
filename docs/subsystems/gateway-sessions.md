@@ -48,6 +48,19 @@ counts as in its list, and on `/api/sessions/delete`, a native session is any
 session file the agent keeps, one nothing was said in too, with no limit
 (`sessions.NativeIDs`); one pass over the agents' files (`sessions.Manage`)
 reads only the agent shown and the agents with gateway sessions (#2776).
+It answers before a first read of a long history (hey_boyce on X: the page
+stood on its placeholder rows on its first open). A file it would read whole
+(no parse kept, an older index, a file written over, or a Claude Code or
+Codex parse that can't be read on after a restart) is read behind the
+answer once more than `quickBytes` (32 MB) of them is waiting; until then its
+row stands on the parse kept, or on a glance at its first 256 KB (id,
+folder, first prompt, start) and, for Claude Code, the titles in its last
+64 KB, with its last activity the file's time. Such a row has `pending:
+true` and no counts, the page asks again every 1.5 s until none is, and a
+glance is never saved in the index (`savable`) nor taken by a refresh as a
+parse (`parsed`). See
+[`internal/sessions/manage_quick.go`](../../internal/sessions/manage_quick.go),
+`TestManageAnswersBeforeFirstReads` and `sessions-pending-fill.test.cjs`.
 Gateway projections have no path,
 resume command or terminal action: the agent's own files of them are not on
 this computer. Their rows carry `gateway: true`; the Sessions page groups them
@@ -73,6 +86,28 @@ before any lock, and an unreadable settings.json keeps the last aliases read.
 Requests, the Requests ledger and model lists keep each call's own id.
 Verification: `TestUsageAliasCountsTwoIdsAsOne`,
 `TestSessionsCountAliasedModelsAsOne`, `TestAliasStatsLeavesItsInputAlone`.
+
+The Usage page can clear its figures (CrazyMouse_TT on X): a model's row's
+"…" has "Clear usage…", and "Clear all usage…" sits under the lists. Each
+asks first, then `POST /api/usage/clear` adds a mark to `usageCleared` in
+settings.json ([`settings.ClearUsage`](../../internal/settings/settings.go)):
+a provider and model as the Models list names them (the alias, the
+provider's shown id), or neither for everything, and the time in Unix
+milliseconds. usage.jsonl is never rewritten. The usage pages leave out
+each call at or before a mark that matches it
+([`cleared.go`](../../internal/usage/cleared.go)): the Overview
+(`summarizeFrom`), and the Requests page, its heatmap and the CSV through
+`Filter.keepsRow`; the request index keys its meta on the marks
+(`clearedKey`), so a cached page is read again. Gateway keys' spending
+limits, the allowances' window holds and Codex's reads go by `usage.Visit`
+and the raw log, so they still count every cleared call: a clear never
+lifts a limit, and the confirmation says so. The marks ride the settings
+part of a sync, so a clear holds on the computers it syncs with, over
+their shared days and the agents' session-file rows too, and a later clear
+of the same model or of everything takes an earlier one's place. Usage ›
+Sessions is not cleared. Verification: `TestClearedUsageLeavesThePages`,
+`TestClearUsageKeepsOneMarkAModel`, `TestUsageClearRoute`,
+`usage-clear.test.cjs`.
 
 Claude Desktop gateway rows can have a local name even without a CLI
 transcript (#1675). [`DesktopTitles`](../../internal/sessions/desktop_titles.go)
@@ -119,6 +154,24 @@ list the session), and `HasGatewayConversations` counts it.
 Implementation: [`internal/sessions/gateway_delete.go`](../../internal/sessions/gateway_delete.go),
 `Restore` in [`internal/sessions/manage.go`](../../internal/sessions/manage.go), and
 [`internal/gui/sessions_manage.go`](../../internal/gui/sessions_manage.go).
+A deleted Codex session also leaves the Codex app's list (zhuddan on Discord).
+The app (ChatGPT.app's Codex, 26.x) lists threads from its own catalog,
+`<CODEX_HOME>/sqlite/codex.db` (`codex-dev.db` for a non-prod build), table
+`local_thread_catalog`, and drops a row only on the app-server's
+`thread/deleted` or `thread/archived`; after its first full sweep it takes in
+only threads newer than its watermark. Delete removes the local host's rows of
+threads whose rollout is gone from that Codex folder's `sessions` and
+`archived_sessions` (named by Codex's state database, neither the file nor its
+packed twin there; a file that can't be looked at counts as there) and raises
+`catalog_revision`, in one `BEGIN IMMEDIATE` transaction that waits for the
+app's own. The removed rows go into the trash note (`codex_catalog`), and
+Restore puts them back. `/api/sessions/manage` does the same once a run
+(`TidyCodexCatalog`) for threads deleted before this. Implementation:
+[`internal/sessions/codex_catalog.go`](../../internal/sessions/codex_catalog.go);
+verification: `TestDeleteForgetsCodexAppCatalog`,
+`TestTidyCodexCatalogForgetsEarlierDeletes`,
+`TestTidyCodexCatalogKeepsWhatItCantJudge`, with schemas from Codex 26.1023 in
+`internal/sessions/testdata/codex-app/`.
 All-time statistics include gateway history older than native files. Calendar
 activity and output totals use each session's actual request dates, including
 intermediate dates; extending the range rebases existing native calendar indices.
@@ -546,7 +599,14 @@ for: `provider_test`, `api_detect` or `model_list`
   full of 0-token rows no agent sent. A list that failed is still a row,
   under the Failed filter too, as is every Test and Detect APIs. Older
   lines stay in `usage.jsonl`, read by nothing.
-  `TestAnsweredModelListIsNoRow` covers it.
+  `TestAnsweredModelListIsNoRow` covers it. A request that is only a step
+  towards a list is no row either (`probelog.Taken`): an Antigravity
+  account's `fetchAvailableModels` with its tier named, which Google
+  answers 400 for a Google AI Pro account before the request without one
+  lists its models (ferock4669 on Discord, a 400 "Model list" row beside
+  every list). That tier isn't named again for a day (`tierRefusedFor`);
+  the request without one is written down as any list.
+  `TestAntigravityRefusedTierAskedOnceAndNoRow`.
 - **Whose:** a row recorded under its host, sent before its provider had
   an id, is listed under the provider saved on that host now
   (`Renames.ProbeOf`), and with none on it, a deleted one's, under the id

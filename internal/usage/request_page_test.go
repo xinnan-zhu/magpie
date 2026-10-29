@@ -329,3 +329,37 @@ func TestVisibleLocalLeavesOutRepeatedMessages(t *testing.T) {
 		t.Fatalf("left out %v, want b's rows 0 and 3 only", got)
 	}
 }
+
+// A read keeps one chunk a source, the map's and the page's both: a copy
+// for each was 13.5 MB after 34k sessions' start (#2278). A chunk an
+// earlier read published is copied once, never changed under its page.
+func TestRequestBlocksKeepOneChunkASource(t *testing.T) {
+	pageHome(t)
+	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
+	path := filepath.Join(sessions.CodexDir(), "sessions", "rollout-2026-09-30T00-00-00-one.jsonl")
+	os.MkdirAll(filepath.Dir(path), 0700)
+	os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"one","model_provider":"custom"}}`+"\n"+`{"type":"turn_context","payload":{"model":"m"}}`+"\n"+
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1},"last_token_usage":{"input_tokens":10,"output_tokens":1}}}}`+"\n", now.Format(time.RFC3339Nano))), 0600)
+	st := readRequestState(now)
+	shared := &requestIndex{}
+	shared.adopt(st)
+	read := func() (*rowChunk, *requestIndex) {
+		idx := shared.private()
+		b := readRequestBlocks(idx, st, All, now, sessions.ReadCallSource, true)
+		defer b.priced.release()
+		if len(b.chunks) != 1 {
+			t.Fatalf("%d chunks, want 1", len(b.chunks))
+		}
+		return b.chunks[0], idx
+	}
+	built, idx := read()
+	if idx.chunks[path] != built || built.Used != idx.tick {
+		t.Fatalf("a built chunk is copied: map %p, page %p", idx.chunks[path], built)
+	}
+	shared.keep(idx, map[string]bool{path: true})
+	used := built.Used
+	again, idx := read()
+	if again == built || idx.chunks[path] != again || again.Used != idx.tick || built.Used != used {
+		t.Fatalf("a published chunk read again: %p (was %p), map %p, used %d (was %d)", again, built, idx.chunks[path], built.Used, used)
+	}
+}

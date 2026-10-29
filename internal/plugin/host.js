@@ -256,9 +256,39 @@ function proxied(env) {
   }
   return env
 }
+// And a program started with no folder of its own runs in workDir, not
+// the host's: the host runs in magpie's config folder, beside
+// settings.json and providers.json, so whatever a program saved by a
+// relative name went there, and a tool told to write "providers.json"
+// would write over magpie's. The chat page plugin (magpie-chat) starts
+// the user's MCP servers this way and runs their tools for a model,
+// whose fetched pages and saved files (jiakun_zhao on 𝕏 asked whose
+// page_<hash>.html and magpie_*.md files they had found) belong in a
+// folder of their own. A folder the plugin gives is kept.
+const workDir = path.join(process.cwd(), "plugin-work")
+let workReady = false
+function workCwd() {
+  if (!workReady) {
+    try {
+      fs.mkdirSync(workDir, { recursive: true })
+      workReady = true
+    } catch {
+      return undefined
+    }
+  }
+  return workDir
+}
 const guard = (o) => {
   if (o != null && typeof o !== "object") return o
   o = { ...o }
+  if (o.cwd == null || o.cwd === "") {
+    const d = workCwd()
+    if (d) {
+      o.cwd = d
+      // and PWD with it, which a shell script reads for its folder
+      if (process.platform !== "win32") o.env = { ...(o.env ?? process.env), PWD: d }
+    }
+  }
   o.env = proxied(o.env)
   if (Array.isArray(o.stdio)) {
     o.stdio = [...o.stdio]
@@ -551,10 +581,11 @@ function asked(input, init) {
 }
 
 // MAGPIE_ONLY are the headers magpie tells a plugin's fetch where the agent
-// that asked works with (WorkDirHeader and WorkGitHeader in
-// internal/provider): for the plugin to read, never for its vendor, so a
-// plugin that sends on the headers it was given sends them nowhere.
-const MAGPIE_ONLY = ["x-magpie-work-dir", "x-magpie-work-git"]
+// that asked works (WorkDirHeader and WorkGitHeader in internal/provider)
+// and that a queue needn't be waited out (FallbackHeader): for the plugin
+// to read, never for its vendor, so a plugin that sends on the headers it
+// was given sends them nowhere.
+const MAGPIE_ONLY = ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback"]
 
 function unsaid(input, init) {
   if (input instanceof Request && MAGPIE_ONLY.some((k) => input.headers.has(k))) {

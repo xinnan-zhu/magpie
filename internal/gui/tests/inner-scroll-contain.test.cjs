@@ -200,3 +200,171 @@ for (const engine of engines) {
     await short.close();
   });
 }
+
+// The guard: every rule in every stylesheet under assets that makes a box
+// scroll vertically (overflow or overflow-y auto or scroll) is built from
+// its own selector, filled past its height and pointed at, and has to hold
+// the wheel at its ends (overscroll-behavior-y contain). A new scroller
+// held by nothing, or a rule that sets a box's overscroll-behavior back to
+// auto, is red here, named by its file and selector. The page itself
+// (.view) is the one box that chains as before.
+const PAGES = new Set([".view", "body.window #view-usage", "body.window #view-routing"]);
+// a selector as the elements it names, one per compound, the last the box:
+// :where() and :is() take their first choice; :not() and other
+// pseudo-classes are left out
+function compounds(sel) {
+  const out = [];
+  let cur = "", depth = 0, comb = null;
+  const flush = () => { if (cur) { out.push({ comb: comb || " ", text: cur }); cur = ""; comb = null; } };
+  for (const ch of sel.trim()) {
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    if (!depth && /\s/.test(ch)) { flush(); continue; }
+    if (!depth && /[>+~]/.test(ch)) { flush(); comb = ch; continue; }
+    cur += ch;
+  }
+  flush();
+  return out.map(({ comb, text }) => {
+    text = text.replace(/:(?:where|is)\(\s*([^,()]+)[^()]*\)/g, "$1").replace(/:not\([^()]*\)/g, "").replace(/::?[a-z-]+(\([^()]*\))?/g, "");
+    return {
+      comb,
+      tag: /^[a-z][a-z0-9-]*/i.exec(text)?.[0] || "div",
+      id: /#([\w-]+)/.exec(text)?.[1],
+      cls: [...text.matchAll(/\.([\w-]+)/g)].map((m) => m[1]),
+      attrs: [...text.matchAll(/\[([\w-]+)(?:[~|^$*]?=["']?([^"'\]]*)["']?)?\]/g)].map((m) => [m[1], m[2] ?? ""]),
+    };
+  });
+}
+// the box a selector names, built at the foot of the page, filled past
+// its height and pointed at: what it holds
+function tryBox({ parts }) {
+  const stage = document.createElement("div");
+  stage.style.cssText = "flex:none;position:relative";
+  document.querySelector("#view-routing").append(stage);
+  const added = [];
+  let at = stage, box = null;
+  for (const p of parts) {
+    if (p.tag === "html") continue;
+    if (p.tag === "body") { for (const c of p.cls) if (!document.body.classList.contains(c)) { document.body.classList.add(c); added.push(c); } continue; }
+    const e = document.createElement(p.tag);
+    if (p.id) e.id = p.id;
+    e.classList.add(...p.cls);
+    for (const [k, v] of p.attrs) e.setAttribute(k, v);
+    if ((p.comb === "+" || p.comb === "~") && at !== stage) at.after(e); else at.append(e);
+    at = box = e;
+  }
+  const done = (r) => { stage.remove(); for (const c of added) document.body.classList.remove(c); return r; };
+  if (!box) return done({ skip: "names no element" });
+  // its size, so it overflows wherever it sits, and shown
+  for (const [k, v] of [["height", "200px"], ["min-height", "0"], ["max-height", "200px"]]) box.style.setProperty(k, v, "important");
+  for (let e = box; e !== stage; e = e.parentElement) if (getComputedStyle(e).display === "none") e.style.setProperty("display", "block", "important");
+  if (box.tagName === "TEXTAREA") box.value = Array.from({ length: 60 }, (_, i) => "line " + i).join("\n");
+  else for (let i = 0; i < 40; i++) {
+    const row = document.createElement(/^[UO]L$/.test(box.tagName) ? "li" : "div");
+    row.style.cssText = "display:block;flex:0 0 100%;width:100%;height:28px";
+    row.textContent = "row " + i;
+    box.append(row);
+  }
+  const overflowY = getComputedStyle(box).overflowY, overflows = box.scrollHeight > box.clientHeight + 1;
+  box.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, composed: true }));
+  return done({ overflowY, overflows, overscroll: getComputedStyle(box).overscrollBehaviorY });
+}
+
+for (const engine of engines) {
+  test(`${engine}: every scroller in every stylesheet holds the wheel at its ends`, async () => {
+    const browser = await launch(engine);
+    try {
+      const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
+      page.setDefaultTimeout(5000);
+      await page.route("**/*", serve("en"));
+      await page.goto("http://magpie.test/?view=routing");
+      await page.locator("#view-routing .rt-req").nth(39).waitFor();
+      // every stylesheet under assets, added where the page doesn't link it
+      const sheets = (await fs.readdir(assets, { recursive: true })).map((f) => f.split(path.sep).join("/")).filter((f) => f.endsWith(".css")).sort();
+      await page.evaluate((files) => {
+        const have = new Set([...document.styleSheets].map((s) => s.href && new URL(s.href).pathname.slice(1)));
+        return Promise.all(files.filter((f) => !have.has(f)).map((f) => new Promise((ok) => {
+          const l = document.createElement("link");
+          l.rel = "stylesheet"; l.href = f; l.onload = l.onerror = ok;
+          document.head.append(l);
+        })));
+      }, sheets);
+      // the rules that scroll a box vertically, each selector of a list
+      const rules = await page.evaluate(() => {
+        const out = [];
+        const walk = (list, file, media) => {
+          for (const r of list) {
+            if (r instanceof CSSStyleRule) {
+              if (/auto|scroll|overlay/.test(r.style.overflowY)) for (const sel of r.selectorText.split(/,(?![^(]*\))/)) out.push({ file, sel: sel.trim(), media });
+            } else if (r.cssRules) walk(r.cssRules, file, r.media ? r.media.mediaText : r.conditionText || media);
+          }
+        };
+        for (const s of document.styleSheets) if (s.href) walk(s.cssRules, new URL(s.href).pathname.slice(1), "");
+        return out;
+      });
+      const files = new Set(rules.map((r) => r.file));
+      for (const f of ["app.css", "plugins/routing/routing.css", "plugins/sessions/sessions.css", "plugins/library/library.css"]) assert.ok(files.has(f), `scrollers read from ${f}: ${[...files]}`);
+
+      const bad = [], held = [];
+      for (const r of rules) {
+        if (PAGES.has(r.sel.replace(/\s+/g, " "))) continue;
+        const name = `${r.file}: ${r.media ? "@media " + r.media + " " : ""}${r.sel}`;
+        // a rule under @media is tried at a size it holds for
+        if (r.media) {
+          let fits = false;
+          for (const [width, height] of [[1300, 800], [600, 800], [1300, 560], [360, 640]]) {
+            await page.setViewportSize({ width, height });
+            if (await page.evaluate((m) => matchMedia(m).matches, r.media)) { fits = true; break; }
+          }
+          if (!fits) { bad.push(`${name}: no window size here that its @media holds for`); continue; }
+        }
+        const got = await page.evaluate(tryBox, { parts: compounds(r.sel) });
+        await page.setViewportSize({ width: 1300, height: 800 });
+        if (got.skip) bad.push(`${name}: ${got.skip}`);
+        else if (!/auto|scroll|overlay/.test(got.overflowY)) bad.push(`${name}: built from its selector, but the rule didn't take (overflow-y ${got.overflowY})`);
+        else if (!got.overflows) bad.push(`${name}: filled, but doesn't overflow`);
+        else if (got.overscroll !== "contain") bad.push(`${name}: overscroll-behavior-y ${got.overscroll}, so the wheel at its ends moves the page`);
+        else held.push(name);
+      }
+      assert.deepEqual(bad, [], `${held.length} scrollers hold the wheel; these don't`);
+      assert.ok(held.length >= 30, `scrollers checked: ${held.length}`);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+// Safari 15 (macOS 12's WebKit unless Safari was updated, #220) has no
+// overscroll-behavior: compat.js keeps the wheel at a held box's ends
+// itself. Here the engine is made to lack it: CSS.supports says no and
+// every box's overscroll-behavior is auto.
+for (const engine of engines) {
+  test(`${engine}: without overscroll-behavior, Requests' list still keeps the wheel at its ends`, async () => {
+    const browser = await launch(engine);
+    try {
+      const ctx = await browser.newContext({ viewport: { width: 900, height: 560 }, reducedMotion: "reduce" });
+      await ctx.addInitScript(() => {
+        const supports = CSS.supports.bind(CSS);
+        CSS.supports = (...a) => !/overscroll/.test(a.join(" ")) && supports(...a);
+        document.addEventListener("DOMContentLoaded", () => document.head.append(Object.assign(document.createElement("style"), { textContent: "* { overscroll-behavior: auto !important; }" })));
+      });
+      const page = await ctx.newPage();
+      page.setDefaultTimeout(5000);
+      await page.route("**/*", serve("en"));
+      await page.goto("http://magpie.test/?view=routing");
+      const view = page.locator("#view-routing");
+      await page.locator("#view-routing .rt-req").nth(39).waitFor();
+      const list = page.locator("#view-routing .rt-reqs").first();
+      assert.equal(await list.evaluate((l) => getComputedStyle(l).overscrollBehaviorY), "auto", "the engine is made to lack it");
+      await heldAtEnds(page, view, list, "the requests' list");
+      // the page's own wheel still moves it, over its gutter
+      const vb = await view.boundingBox(), before = await view.evaluate((v) => v.scrollTop);
+      await page.mouse.move(vb.x + 3, vb.y + vb.height / 2);
+      await page.mouse.wheel(0, 200);
+      await page.waitForTimeout(400);
+      assert.notEqual(await view.evaluate((v) => v.scrollTop), before, "the page itself still scrolls");
+    } finally {
+      await browser.close();
+    }
+  });
+}

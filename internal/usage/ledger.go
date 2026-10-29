@@ -120,6 +120,9 @@ func SourceOf(r Row) string {
 // keepsRow is keeps with the one dimension a Record does not carry: which of
 // the two sources the row is of (Row.Source, not the record's).
 func (f Filter) keepsRow(r *Row) bool {
+	if clearedNow().hides(&r.Record) { // the user's clears (cleared.go)
+		return false
+	}
 	if f.Through != "" && SourceOf(*r) != f.Through {
 		return false
 	}
@@ -256,6 +259,7 @@ func LedgerOfAt(p Period, f Filter, now time.Time) Ledgered {
 
 // ledgerOfAt is LedgerOfAt over the session files' calls reader reads.
 func ledgerOfAt(p Period, f Filter, now time.Time, reader func(time.Time) []sessions.Call) Ledgered {
+	readCleared() // the user's clears, which keepsRow leaves out
 	since := p.Since(now)
 	gatewaySince := since
 	if !since.IsZero() {

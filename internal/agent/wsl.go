@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -365,7 +366,8 @@ var wslKinds = []wslKind{
 				return func(cur map[string]string) []Option {
 					return append(group("Claude Code", claudeOwn(cur["model"], nil, catalog.Provider("anthropic"))), claudeViaMagpie(false)...)
 				}
-			case "effort":
+			case "effort", "ultracode":
+				// their own options read only what was last seen
 				return nil
 			case "login":
 				// its sign-in, while the model last seen is magpie's
@@ -376,7 +378,18 @@ var wslKinds = []wslKind{
 					return claudeSignIns()
 				}
 			}
-			// a tier: magpie's models while the model last seen is one
+			// a tier's effort or the subagents': the levels of the model it
+			// was last seen on, as when running, not a model to pick
+			if tier, ok := strings.CutSuffix(key, "_effort"); ok {
+				return func(cur map[string]string) []Option {
+					if !isMagpie(cur["model"]) {
+						return nil
+					}
+					return static(tierEfforts(cmp.Or(cur[tier], cur["model"]))...)
+				}
+			}
+			// a tier, the subagents or auto mode: magpie's models while the
+			// model last seen is one
 			return func(cur map[string]string) []Option {
 				if !isMagpie(cur["model"]) {
 					return nil

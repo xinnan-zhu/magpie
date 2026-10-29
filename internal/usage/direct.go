@@ -73,8 +73,8 @@ func directRows(p Period, now time.Time) []Row {
 			matched[ref.Index] = true
 		}
 		for i, call := range logs {
-			if i < len(local.codexActors) && local.codexActors[i] != call.ThreadID {
-				actors[i] = local.codexActors[i]
+			if i < local.codexActors.len() && local.codexActors.at(i) != call.ThreadID {
+				actors[i] = local.codexActors.at(i)
 			}
 		}
 	}

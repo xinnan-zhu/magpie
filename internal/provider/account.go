@@ -159,6 +159,14 @@ func (p Provider) ListedAPIs(model string) []Protocol {
 			return apis
 		}
 	}
+	// Vertex AI serves Gemini on generateContent, and its partner models
+	// (publisher/model) on chat completions alone
+	if p.IsVertex() {
+		if VertexPartner(model) {
+			return []Protocol{Chat}
+		}
+		return []Protocol{Gemini}
+	}
 	// Factory serves each model on the one API droid sends it on
 	if p.ID == "factory" && p.Account != nil {
 		return factoryAPIs(model)

@@ -47,6 +47,12 @@ session resumes in (`SessionTerminal`) and what the menu bar shows. Launch at
 login is the system's own setting (`internal/autostart`) and the listen
 address is `MAGPIE_ADDR`, so neither is in a bundle.
 
+The Usage page's clears (`usageCleared`, see
+[gateway sessions](gateway-sessions.md)) are a preference, not a computer's
+own, so they ride the settings part: a model cleared on one computer is
+cleared on the others, their shared usage days included. The usage files
+themselves are never rewritten by a clear.
+
 The providers part works the same way for which account an agent is kept
 signed in to (`KeepLogin`, `KeepLoginAs`, `SwitchOnly`): one person keeps a
 personal account at home and a work account at the office, and sync set
@@ -175,6 +181,12 @@ repository can keep the token. The branch is part of the sync state key.
   disk, and `RequestArchive` synced from a computer with a bucket keeps
   nothing on one without (`TestArchiveNeverOnDiskUnasked`,
   `TestRequestArchiveLocalIsThisComputers`).
+
+A library skill turned off on one computer (`OffHere`, see
+[library](library.md)) stays off there alone: the library part never carries
+it, and putting another computer's library keeps it, so the others keep the
+skill on and a sync from them doesn't turn it on here
+(`TestSkillOffHereThroughSync`, two computers through the fake S3).
 
 ## Verification
 
