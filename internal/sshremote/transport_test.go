@@ -2,10 +2,13 @@ package sshremote
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,10 +18,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -32,37 +37,82 @@ func fakeSSH() int {
 			return 0
 		}
 	}
+	if args[len(args)-1] == preparePrivateForward {
+		// Match mktemp's exact ten-character suffix; MkdirTemp's decimal
+		// suffix can have fewer characters and is not this shell's output.
+		var suffix [5]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return 8
+		}
+		dir := "/tmp/magpie-ssh." + hex.EncodeToString(suffix[:])
+		if err := os.Mkdir(dir, 0700); err != nil {
+			return 8
+		}
+		if os.WriteFile(filepath.Join(os.Getenv("HOME"), "private-forward-dir"), []byte(dir), 0600) != nil {
+			return 8
+		}
+		os.Stdout.WriteString(dir + "\n")
+		return 0
+	}
+	if strings.HasPrefix(args[len(args)-1], "rm -rf -- '/tmp/magpie-ssh.") {
+		if proc.Command("/bin/sh", "-c", args[len(args)-1]).Run() != nil {
+			return 8
+		}
+		return 0
+	}
 	for n, a := range args {
 		if a != "-L" && a != "-R" {
 			continue
 		}
 		spec := strings.Split(args[n+1], ":")
-		if len(spec) != 4 {
+		if len(spec) != 4 && len(spec) != 3 {
 			return 2
 		}
-		ln, e := net.Listen("tcp", spec[0]+":"+spec[1])
+		address, target, network := spec[0], spec[1]+":"+spec[2], "unix"
+		if len(spec) == 4 {
+			address, target, network = spec[0]+":"+spec[1], spec[2]+":"+spec[3], "tcp"
+		}
+		ln, e := net.Listen(network, address)
 		if e != nil {
 			return 3
 		}
-		for {
-			c, e := ln.Accept()
-			if e != nil {
-				return 0
-			}
-			go func() {
-				defer c.Close()
-				other, e := net.Dial("tcp", spec[2]+":"+spec[3])
+		defer ln.Close()
+		serve := func() {
+			for {
+				c, e := ln.Accept()
 				if e != nil {
 					return
 				}
-				defer other.Close()
-				done := make(chan struct{})
-				go func() { io.Copy(c, other); close(done) }()
-				io.Copy(other, c)
-				other.Close()
-				<-done
-			}()
+				go func() {
+					defer c.Close()
+					other, e := net.Dial("tcp", target)
+					if e != nil {
+						return
+					}
+					defer other.Close()
+					done := make(chan struct{})
+					go func() {
+						io.Copy(c, other)
+						c.(interface{ CloseWrite() error }).CloseWrite()
+						close(done)
+					}()
+					io.Copy(other, c)
+					other.(*net.TCPConn).CloseWrite()
+					<-done
+				}()
+			}
 		}
+		if network == "unix" {
+			go serve()
+			cmd := proc.Command("/bin/sh", "-c", args[len(args)-1])
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if cmd.Run() != nil {
+				return 9
+			}
+			return 0
+		}
+		serve()
+		return 0
 	}
 	var req Request
 	if e := json.NewDecoder(os.Stdin).Decode(&req); e != nil {
@@ -74,7 +124,7 @@ func fakeSSH() int {
 	var out any
 	switch req.Method {
 	case "inspect":
-		out = Inspection{Protocol: Protocol, Installed: true, Compatible: true, Ready: true, Context: Context{Target: "fixture-context"}}
+		out = Inspection{Protocol: Protocol, Installed: true, Compatible: true, Ready: true, Context: Context{Target: "fixture-context", OS: "linux"}}
 	case "web-login":
 		port, _ := strconv.Atoi(os.Getenv("MAGPIE_SSH_FIXTURE_PORT"))
 		out = map[string]any{"key": "fixture-web-secret", "port": port}
@@ -257,14 +307,28 @@ func TestDeployChecksDigestAndArchitectureBeforeSSH(t *testing.T) {
 }
 
 func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
+	testSSHReverseTunnel(t, false)
+}
+
+func TestSSHReverseTunnelFallsBackFromForcedWildcardToPrivateSocket(t *testing.T) {
+	testSSHReverseTunnel(t, true)
+}
+
+func testSSHReverseTunnel(t *testing.T, private bool) {
 	fakeSystemSSH(t)
 	put(t, provider.Path(), `{"providers":[{"id":"api","name":"Fixture API","chat":"https://api.example.test/v1","key":"fixture-key","models":["model"]}]}`)
-	// The fake SSH forwards TCP only. This local management fixture stands in
-	// for the remote daemon; Linux socket-table scope is tested separately.
+	// The fake SSH uses real TCP/Unix sockets and the real relay. This API
+	// fixture simulates the old daemon's exact pre-write refusal once.
+	var calls atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in Upstream
 		if json.NewDecoder(r.Body).Decode(&in) != nil || r.Header.Get("X-Magpie-SSH-Target") != "fixture-context" {
 			http.Error(w, "context", 409)
+			return
+		}
+		if private && calls.Add(1) == 1 {
+			body, _ := json.Marshal(map[string]string{"error": tunnelCheckError})
+			json.NewEncoder(w).Encode(Response{Error: fmt.Sprintf("remote operation refused (400): %s", body)})
 			return
 		}
 		client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}}
@@ -330,6 +394,9 @@ func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ps, err := provider.Stored()
+	if private && c.tunnel.forward.input == nil {
+		t.Fatal("did not switch to a session-owned Unix transport")
+	}
 	if err != nil || len(ps) != 2 || ps[1].Key == "" || ps[1].ID != out.Provider {
 		t.Fatal("upstream was not usable", err)
 	}
@@ -338,13 +405,179 @@ func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
 	if err != nil || again.Provider != out.Provider {
 		t.Fatal(again, err)
 	}
+	if _, err := c.StartTunnel(context.Background(), port^1, nil); err == nil || !strings.Contains(err.Error(), "Reconnect SSH") {
+		t.Fatalf("changed port silently reused the old tunnel: %v", err)
+	}
 	c.Close()
+	if private {
+		dir, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "private-forward-dir"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = os.Stat(string(dir)); !os.IsNotExist(err) {
+			t.Fatal("private socket directory survived close", err)
+		}
+	}
 	if _, ok := access.Authenticate(ps[1].Key); ok {
 		t.Fatal("connection close left its key usable")
 	}
 	if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+p, time.Second); err == nil {
 		conn.Close()
 		t.Fatal("reverse listener survived close")
+	}
+}
+
+func TestSSHTunnelLostReplyKeepsPendingTransportWithoutFallback(t *testing.T) {
+	fakeSystemSSH(t)
+	put(t, provider.Path(), `{"providers":[{"id":"api","name":"Fixture API","chat":"https://api.example.test/v1","key":"fixture-key","models":["model"]}]}`)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"result":`)
+	}))
+	defer remote.Close()
+	t.Setenv("MAGPIE_SSH_FIXTURE_CONTROL", remote.URL)
+	c, err := Connect(context.Background(), Host{Name: "fixture", Target: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	_, err = c.StartTunnel(context.Background(), port, func(string) http.Handler { return http.NotFoundHandler() })
+	if err == nil || !strings.Contains(err.Error(), "result unconfirmed") || c.tunnel == nil || c.tunnel.forward.input != nil {
+		t.Fatalf("lost reply discarded or replaced its pending operation: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(os.Getenv("HOME"), "private-forward-dir")); !os.IsNotExist(err) {
+		t.Fatal("lost reply started fallback")
+	}
+}
+
+func TestSSHPrivateForwardPreservesHalfCloseAndCleansDirectory(t *testing.T) {
+	fakeSystemSSH(t)
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go func() {
+		c, err := target.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		body, err := io.ReadAll(io.LimitReader(c, 64))
+		if err == nil && string(body) == "request" {
+			c.Write([]byte("complete response"))
+		}
+	}()
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+	localPort := strconv.Itoa(target.Addr().(*net.TCPAddr).Port)
+	f, err := startPrivateForward(context.Background(), Host{Name: "fixture", Target: "fixture"}, port, localPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	c.Write([]byte("request"))
+	c.(*net.TCPConn).CloseWrite()
+	body, err := io.ReadAll(c)
+	if err != nil || string(body) != "complete response" {
+		t.Fatalf("half-close lost the reply: %q %v", body, err)
+	}
+	f.Close()
+	dir, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "private-forward-dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(string(dir)); !os.IsNotExist(err) {
+		t.Fatal("private directory survived close", err)
+	}
+}
+
+func TestSSHTunnelPrivateValidationRefusalReleasesKeyAndDirectory(t *testing.T) {
+	fakeSystemSSH(t)
+	put(t, provider.Path(), `{"providers":[{"id":"api","name":"Fixture API","chat":"https://api.example.test/v1","key":"fixture-key","models":["model"]}]}`)
+	var calls atomic.Int32
+	var key atomic.Value
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in Upstream
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Error(err)
+			return
+		}
+		key.Store(in.Key)
+		calls.Add(1)
+		body, _ := json.Marshal(map[string]string{"error": tunnelCheckError})
+		json.NewEncoder(w).Encode(Response{Error: fmt.Sprintf("remote operation refused (400): %s", body)})
+	}))
+	defer remote.Close()
+	t.Setenv("MAGPIE_SSH_FIXTURE_CONTROL", remote.URL)
+	c, err := Connect(context.Background(), Host{Name: "fixture", Target: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+	_, err = c.StartTunnel(context.Background(), port, func(string) http.Handler { return http.NotFoundHandler() })
+	if !tunnelCheckRefused(err) || calls.Load() != 2 || c.tunnel != nil || len(c.forwards) != 0 || len(c.closers) != 0 {
+		t.Fatalf("confirmed private refusal kept pending resources: %v (%d calls)", err, calls.Load())
+	}
+	secret, _ := key.Load().(string)
+	if secret == "" {
+		t.Fatal("no allocated key was checked")
+	}
+	if _, ok := access.Authenticate(secret); ok {
+		t.Fatal("refused private tunnel left its key usable")
+	}
+	dir, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "private-forward-dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(string(dir)); !os.IsNotExist(err) {
+		t.Fatal("refused private tunnel left its directory", err)
+	}
+}
+
+func TestSSHPrivateForwardOccupiedPortLeavesNoDirectory(t *testing.T) {
+	fakeSystemSSH(t)
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	f, err := startPrivateForward(context.Background(), Host{Name: "fixture", Target: "fixture"}, occupied.Addr().(*net.TCPAddr).Port, "9")
+	if f != nil {
+		f.Close()
+		t.Fatal("replaced an occupied listener")
+	}
+	var ssh *SSHError
+	if !errors.As(err, &ssh) || ssh.Code != "forward_failed" {
+		t.Fatalf("occupied port was not identified: %v", err)
+	}
+	dir, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "private-forward-dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(string(dir)); !os.IsNotExist(err) {
+		t.Fatal("failed start left a private directory", err)
 	}
 }
 

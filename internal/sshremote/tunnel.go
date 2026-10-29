@@ -30,9 +30,20 @@ type Upstream struct {
 	Key    string `json:"key"`
 }
 
+// Only StartTunnel owns these forwards and closers. Caller holds c.mu.
+func (c *Connection) discardTunnel() {
+	for _, f := range c.forwards {
+		f.Close()
+	}
+	for _, close := range c.closers {
+		close()
+	}
+	c.forwards, c.closers, c.tunnel = nil, nil, nil
+}
+
 // StartTunnel shares only the explicitly authenticated ingress the caller gives
 // it. The forward and the key are disposed with this connection. It never
-// changes LAN settings or installs a fallback.
+// changes LAN settings or installs a routing fallback.
 func (c *Connection) StartTunnel(ctx context.Context, port int, front func(string) http.Handler) (Tunnel, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -40,11 +51,18 @@ func (c *Connection) StartTunnel(ctx context.Context, port int, front func(strin
 		return Tunnel{}, errors.New("SSH connection is closed")
 	}
 	if c.tunnel != nil {
+		if c.tunnel.input.Port != port {
+			return Tunnel{}, errors.New("Reconnect SSH before changing the port of an existing or unconfirmed tunnel")
+		}
 		if err := c.tunnel.forward.Error(); err != nil {
+			c.discardTunnel()
 			return Tunnel{}, err
 		}
 		var result Tunnel
 		err := c.API(ctx, "/api/ssh/upstream", c.tunnel.input, &result)
+		if tunnelCheckRefused(err) {
+			c.discardTunnel()
+		}
 		return result, err
 	}
 	if !c.Inspection.Ready || port < 1024 || port > 65535 {
@@ -57,6 +75,10 @@ func (c *Connection) StartTunnel(ctx context.Context, port int, front func(strin
 	}
 	if models, _ := provider.CatalogFor(""); len(models) == 0 {
 		return Tunnel{}, errors.New("The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.")
+	}
+	local, err := ReadContext("")
+	if err != nil {
+		return Tunnel{}, err
 	}
 	k, err := access.NewMachineKey("SSH · " + c.Host.Name)
 	if err != nil {
@@ -81,10 +103,6 @@ func (c *Connection) StartTunnel(ctx context.Context, port int, front func(strin
 	// create-only operation, never a second provider or a replayed model request.
 	c.forwards = append(c.forwards, f)
 	c.closers = append(c.closers, cleanup)
-	local, err := ReadContext("")
-	if err != nil {
-		return Tunnel{}, err
-	}
 	id := c.Host.ID
 	if id == "" {
 		id = c.ID
@@ -92,7 +110,26 @@ func (c *Connection) StartTunnel(ctx context.Context, port int, front func(strin
 	in := Upstream{Source: local.Target + ":" + id, ID: "ssh-" + id, Name: "SSH · " + c.Host.Name, Port: port, Key: k.Secret}
 	c.tunnel = &Tunnel{Provider: in.ID, Port: port, input: in, forward: f}
 	var result Tunnel
-	if err = c.API(ctx, "/api/ssh/upstream", in, &result); err != nil {
+	err = c.API(ctx, "/api/ssh/upstream", in, &result)
+	if tunnelCheckRefused(err) {
+		// GatewayPorts yes ignores even an explicit 127.0.0.1 bind. Close
+		// the refused TCP forward before opening the private Unix transport.
+		forwardErr := f.Error()
+		f.Close()
+		if forwardErr == nil && c.Inspection.Context.OS == "linux" {
+			f, err = startPrivateForward(c.ctx, c.Host, port, lp)
+			if err == nil {
+				c.forwards[0], c.tunnel.forward = f, f
+				err = c.API(ctx, "/api/ssh/upstream", in, &result)
+			}
+		} else if forwardErr != nil {
+			err = forwardErr
+		}
+		if err != nil && (f == nil || tunnelCheckRefused(err) || forwardErr != nil) {
+			c.discardTunnel()
+		}
+	}
+	if err != nil {
 		return Tunnel{}, err
 	}
 	if err = f.Error(); err != nil {
@@ -132,7 +169,7 @@ func CheckUpstream(ctx context.Context, in Upstream) (Tunnel, error) {
 		}
 		select {
 		case <-until.Done():
-			return Tunnel{}, errors.New("SSH reverse forwarding did not authenticate on a loopback-only listener; check GatewayPorts and port conflicts")
+			return Tunnel{}, errors.New(tunnelCheckError)
 		case <-time.After(60 * time.Millisecond):
 		}
 	}

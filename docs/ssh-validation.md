@@ -1,8 +1,47 @@
 # SSH first-version validation
 
 This record covers the implementation in [SSH management](subsystems/ssh-management.md).
-It is development verification, not a claim of compatibility with a real SSH
-server, subscription account, or installed Claude Code/Codex version.
+Dated follow-ups distinguish fixtures from real-host checks. A transport check
+does not establish compatibility with a subscription account or an installed
+Claude Code/Codex version.
+
+## 2026-10-29: managed SSH servers and cloud builds
+
+The reported host actually runs sshd with a platform-owned, read-only config
+forcing `GatewayPorts yes`. The ordinary TCP reverse forward becomes a
+wildcard listener even when the client requests loopback. No server config
+was changed.
+
+- On that real Linux host, exercised the embedded Python relay through a real
+  SSH Unix reverse forward. An authenticated fixture `/v1/models` succeeded;
+  the TCP listener was `127.0.0.1` only, the directory was mode 0700 and the
+  Unix socket mode 0600. Closing SSH stdin removed the temporary directory.
+  This was a transport prototype using the exact relay source, not an
+  installed desktop build or a real model/agent operation.
+- Passed focused SSH transport/API tests and `go test -race -tags nogui
+  ./internal/sshremote -run 'TestSSHPrivate|TestSSHReverse|TestSSHTunnel|TestSSHAPI'
+  -count=1` (52.745s) on macOS arm64, Go 1.27.1, with a temporary HOME and
+  pinned caches. Coverage includes old-peer validation refusal, authenticated
+  private forwarding, half-close replies, occupied ports, key/directory
+  cleanup, changed-port refusal and retention after lost replies. The first
+  race run exposed a fixture-only variable-length directory suffix; the fake
+  SSH now emits the shell's exact ten-character suffix.
+- Restoring the previous `tunnel.go` through a Go overlay makes
+  `TestSSHReverseTunnelFallsBackFromForcedWildcardToPrivateSocket` fail at
+  runtime with the reported loopback-listener authentication refusal. The
+  changed implementation passes.
+- Passed `go vet -tags nogui ./internal/sshremote ./internal/gui`, formatting,
+  dictionary ownership/completeness and all three extra locale checks.
+  The SSH page passed in both engines, all five languages at 1100/420px.
+  Chromium 147 (build 1217) and WebKit 26.5 (2336) were used; the unavailable
+  requested Chromium build 1234 was not tested.
+- Release packages, complete multi-platform Test CI and Docker builds run on
+  GitHub; no local release package or Docker image was built for this change.
+  The feed guard test rejects a same-size corrupted asset, a missing asset
+  and an upload that has not completed. Workflow YAML and relay syntax parse.
+- Not checked here: a real inference request, installed desktop interaction,
+  real agent config changes or the entire browser suite. Full-repository Go
+  and multi-platform checks are delegated to CI before tagging a release.
 
 ## 2026-10-29: setup feedback and missing models
 

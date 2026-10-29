@@ -4,6 +4,11 @@
 // works. {name} slots are filled by t(str, vars).
 const I18N = {
   zh: {
+    "This SSH server requires Python 3 on the remote host for private forwarding": "此 SSH 服务器需要远端安装 Python 3 才能使用私有转发",
+    "The remote shell returned an invalid private SSH directory": "远端 Shell 返回的私有 SSH 目录无效",
+    "The private SSH listener returned an invalid ready reply": "私有 SSH 监听返回的就绪响应无效",
+    "Reconnect SSH before changing the port of an existing or unconfirmed tunnel": "现有或待确认的隧道需要先重新连接 SSH，才能更换端口",
+    "SSH reverse forwarding did not authenticate on a loopback-only listener; check GatewayPorts and port conflicts": "SSH 反向转发未能在仅监听回环地址的端口上通过认证，请检查 GatewayPorts 和端口占用",
     "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "本机网关还没有模型。请先在这台电脑上添加供应商或订阅，再重新连接。",
     "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "本机网关正由另一个 Magpie 进程提供。请退出那个进程后重新连接；如果是旧版本，也可在“网关”页面接管。",
     "MCP hub": "MCP 聚合",
@@ -4095,6 +4100,11 @@ const I18N = {
     "Where": "位置",
   },
   "zh-TW": {
+    "This SSH server requires Python 3 on the remote host for private forwarding": "此 SSH 伺服器需要遠端安裝 Python 3 才能使用私有轉送",
+    "The remote shell returned an invalid private SSH directory": "遠端 Shell 回傳的私有 SSH 目錄無效",
+    "The private SSH listener returned an invalid ready reply": "私有 SSH 監聽回傳的就緒回應無效",
+    "Reconnect SSH before changing the port of an existing or unconfirmed tunnel": "現有或待確認的通道需要先重新連線 SSH，才能更換連接埠",
+    "SSH reverse forwarding did not authenticate on a loopback-only listener; check GatewayPorts and port conflicts": "SSH 反向轉送未能在僅監聽回環位址的連接埠上通過驗證，請檢查 GatewayPorts 和連接埠占用",
     "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "本機閘道還沒有模型。請先在這台電腦上新增供應商或訂閱，再重新連線。",
     "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "本機閘道正由另一個 Magpie 程序提供。請結束那個程序後重新連線；如果是舊版本，也可在「閘道」頁面接管。",
     "MCP hub": "MCP 聚合",
@@ -8171,6 +8181,11 @@ const I18N = {
     "Where": "位置",
   },
   ja: {
+    "This SSH server requires Python 3 on the remote host for private forwarding": "この SSH サーバーでプライベート転送を使うには、リモートホストに Python 3 が必要です",
+    "The remote shell returned an invalid private SSH directory": "リモートシェルが無効なプライベート SSH ディレクトリを返しました",
+    "The private SSH listener returned an invalid ready reply": "プライベート SSH リスナーが無効な準備完了応答を返しました",
+    "Reconnect SSH before changing the port of an existing or unconfirmed tunnel": "既存または未確認のトンネルのポートを変更する前に SSH を再接続してください",
+    "SSH reverse forwarding did not authenticate on a loopback-only listener; check GatewayPorts and port conflicts": "SSH 逆転送をループバック専用リスナーで認証できませんでした。GatewayPorts とポートの競合を確認してください",
     "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "ローカルゲートウェイにモデルがありません。このコンピュータで先にプロバイダまたはサブスクリプションを追加してから、再接続してください。",
     "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "ローカルゲートウェイは別の Magpie プロセスが提供しています。そのプロセスを終了して再接続してください。古いバージョンなら「ゲートウェイ」ページで引き継ぐこともできます。",
     "MCP hub": "MCP ハブ",
@@ -12249,6 +12264,11 @@ const I18N = {
     "Where": "場所",
   },
   de: {
+    "This SSH server requires Python 3 on the remote host for private forwarding": "Dieser SSH-Server benötigt Python 3 auf dem entfernten Rechner für die private Weiterleitung",
+    "The remote shell returned an invalid private SSH directory": "Die entfernte Shell hat ein ungültiges privates SSH-Verzeichnis zurückgegeben",
+    "The private SSH listener returned an invalid ready reply": "Der private SSH-Listener hat eine ungültige Bereitschaftsantwort zurückgegeben",
+    "Reconnect SSH before changing the port of an existing or unconfirmed tunnel": "Verbinden Sie SSH erneut, bevor Sie den Port eines bestehenden oder unbestätigten Tunnels ändern",
+    "SSH reverse forwarding did not authenticate on a loopback-only listener; check GatewayPorts and port conflicts": "Die SSH-Rückwärtsweiterleitung konnte sich nicht an einem reinen Loopback-Listener authentifizieren. Prüfen Sie GatewayPorts und Portkonflikte",
     "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "Das lokale Gateway hat keine Modelle. Fügen Sie auf diesem Computer zuerst einen Anbieter oder ein Abonnement hinzu und verbinden Sie es erneut.",
     "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "Ein anderer Magpie-Prozess stellt das lokale Gateway bereit. Beenden Sie ihn und verbinden Sie sich erneut. Eine ältere Version können Sie auch auf der Gateway-Seite übernehmen.",
     "MCP hub": "MCP-Hub",

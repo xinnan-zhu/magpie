@@ -41,8 +41,10 @@ func sshError(stderr string, err error) error {
 		code, msg = "needs_trust", "Verify this host's key with system SSH in a terminal"
 	case strings.Contains(stderr, "Permission denied"), strings.Contains(stderr, "passphrase"):
 		code, msg = "needs_auth", "Authenticate with system SSH or unlock your key in ssh-agent, then reconnect"
-	case strings.Contains(stderr, "forwarding failed"), strings.Contains(stderr, "cannot listen"):
+	case strings.Contains(stderr, "forwarding failed"), strings.Contains(stderr, "cannot listen"), strings.Contains(stderr, "Address already in use"):
 		code, msg = "forward_failed", "SSH forwarding was refused or the port is occupied"
+	case strings.Contains(stderr, "Python 3 is required for private SSH forwarding"):
+		code, msg = "python_required", "This SSH server requires Python 3 on the remote host for private forwarding"
 	case strings.Contains(stderr, "This release does not support SSH control"):
 		code, msg = "unsupported_release", "This release does not support SSH control; choose a compatible Magpie build"
 	}
@@ -140,40 +142,73 @@ func Call(ctx context.Context, h Host, req Request, out any) error {
 }
 
 type forward struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	mu     sync.Mutex
-	err    error
+	cancel    context.CancelFunc
+	done      chan struct{}
+	mu        sync.Mutex
+	err       error
+	input     io.WriteCloser
+	onClose   func()
+	closeOnce sync.Once
 }
 
 func startForward(ctx context.Context, h Host, spec string) (*forward, error) {
+	f, _, err := launchForward(ctx, h, spec, "")
+	return f, err
+}
+
+func launchForward(ctx context.Context, h Host, spec, command string) (*forward, io.ReadCloser, error) {
 	if err := h.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// OpenSSH cannot clear configured forwards without also clearing our -L/-R.
 	// Refuse that ambiguous configuration instead of opening extra listeners.
 	config := proc.CommandContext(ctx, "ssh", append(BaseArgs(h, true), "-G", "--", h.Target)...)
 	resolved, err := config.Output()
 	if err != nil {
-		return nil, sshError("", err)
+		return nil, nil, sshError("", err)
 	}
 	for _, line := range strings.Split(string(resolved), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) > 1 && (fields[0] == "localforward" || fields[0] == "remoteforward" || fields[0] == "dynamicforward") {
-			return nil, errors.New("use an SSH Host alias without configured LocalForward, RemoteForward or DynamicForward")
+			return nil, nil, errors.New("use an SSH Host alias without configured LocalForward, RemoteForward or DynamicForward")
 		}
 	}
 	life, cancel := context.WithCancel(ctx)
-	args := append(BaseArgs(h, true), "-N")
+	args := BaseArgs(h, true)
+	if command == "" {
+		args = append(args, "-N")
+	}
 	args = append(args, spec[:2], spec[2:], "--", h.Target)
+	if command != "" {
+		args = append(args, command)
+	}
 	cmd := proc.CommandContext(life, "ssh", args...)
 	stderr := &boundedBuffer{limit: 8192}
 	cmd.Stderr = stderr
+	var input io.WriteCloser
+	var output io.ReadCloser
+	if command != "" {
+		input, err = cmd.StdinPipe()
+		if err == nil {
+			output, err = cmd.StdoutPipe()
+		}
+		if err != nil {
+			cancel()
+			if input != nil {
+				input.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, err
+		if input != nil {
+			input.Close()
+			output.Close()
+		}
+		return nil, nil, err
 	}
-	f := &forward{cancel: cancel, done: make(chan struct{})}
+	f := &forward{cancel: cancel, done: make(chan struct{}), input: input}
 	go func() {
 		err := cmd.Wait()
 		f.mu.Lock()
@@ -183,9 +218,20 @@ func startForward(ctx context.Context, h Host, spec string) (*forward, error) {
 		f.mu.Unlock()
 		close(f.done)
 	}()
-	return f, nil
+	return f, output, nil
 }
-func (f *forward) Close() { f.cancel(); <-f.done }
+func (f *forward) Close() {
+	f.closeOnce.Do(func() {
+		if f.input != nil {
+			f.input.Close()
+		}
+		f.cancel()
+		<-f.done
+		if f.onClose != nil {
+			f.onClose()
+		}
+	})
+}
 func (f *forward) Error() error {
 	select {
 	case <-f.done:
@@ -284,6 +330,7 @@ func (c *Connection) API(ctx context.Context, path string, body any, out any) er
 	// The remote API also uses 400 for file-write failures, which may be
 	// partial. Only known preconditions establish that no mutation ran.
 	confirmed := errors.As(err, &refusal) && (refusal.Status == 401 || refusal.Status == 403 || refusal.Status == 404 || refusal.Status == 409 || refusal.Status == 400 && (refusal.Code == "no_models" || refusal.Code == "all_hidden"))
+	confirmed = confirmed || path == "/api/ssh/upstream" && tunnelCheckRefused(err)
 	if err != nil && body != nil && !confirmed {
 		return fmt.Errorf("remote result unconfirmed; refresh before another action: %w", err)
 	}

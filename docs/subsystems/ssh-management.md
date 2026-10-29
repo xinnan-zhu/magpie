@@ -157,6 +157,23 @@ These modes coexist. None clears existing remote providers or enables LAN.
    An empty local model catalog is refused before allocating a machine key
    or starting a tunnel. The remote verification also rejects an empty model
    list rather than creating an upstream that cannot connect an agent.
+   Servers forcing `GatewayPorts yes` can override an explicit loopback bind.
+   On Linux, an exact, confirmed pre-write tunnel-validation refusal closes
+   that TCP forward and switches to [`startPrivateForward`](../../internal/sshremote/private_forward.go).
+   OpenSSH forwards a Unix socket inside a new mode-0700 remote temporary
+   directory. The embedded [`relay.py`](../../internal/sshremote/relay.py), run
+   in that same SSH session, restricts the socket to mode 0600 and serves only
+   `127.0.0.1:<chosen-port>`. This fallback requires remote Python 3 and
+   `AllowStreamLocalForwarding`; it changes no sshd settings and works with
+   existing protocol-1 remote Magpie binaries. The usual remote listener and
+   authenticated model checks still run before provider creation. EOF on the
+   SSH channel ends the relay; closing the local connection also attempts
+   bounded removal of its exact temporary directory. An unreachable host or
+   uncatchable remote kill can leave that directory for manual cleanup.
+   A lost reply or a provider-write failure never starts this fallback.
+   A confirmed validation failure releases its forward and key; an uncertain
+   result retains the pending operation. A request to change a retained
+   tunnel's port is rejected explicitly until SSH is reconnected.
 3. **Copy selected setup.** [`SelectCopy`, `PlanImport`, `ApplyImport`](../../internal/provider/ssh_import.go)
    use a portable subset of the existing providers/groups model. Only API
    providers and explicit routing groups are supported; every dependency must
