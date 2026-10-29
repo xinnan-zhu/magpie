@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +39,33 @@ func put(t *testing.T, path, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0700); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSSHWebRefusalKeepsTheRemoteErrorFields(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("loopback user services are supported on Linux and macOS")
+	}
+	home := sshHome(t)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Magpie-SSH-Target") != "fixture-target" || len(r.Cookies()) != 1 || r.Cookies()[0].Value != "fixture-web-key" {
+			http.Error(w, "wrong fixture context or credential", 403)
+			return
+		}
+		w.WriteHeader(400)
+		w.Write([]byte(`{"agent":"Codex","code":"no_models","error":"Add a provider or subscription in magpie first, then connect Codex"}`))
+	}))
+	defer remote.Close()
+	addr := strings.TrimPrefix(remote.URL, "http://")
+	if runtime.GOOS == "darwin" {
+		put(t, filepath.Join(home, "Library", "LaunchAgents", "com.yetone.magpie.serve.plist"), `<array><string>--web=`+addr+`</string></array><key>MAGPIE_WEB_KEY</key><string>fixture-web-key</string>`)
+	} else {
+		put(t, filepath.Join(home, ".config", "systemd", "user", "magpie.service"), "[Service]\nExecStart=magpie serve \"--web="+addr+"\"\nEnvironment=\"MAGPIE_WEB_KEY=fixture-web-key\"\n")
+	}
+	_, err := webCall(context.Background(), "/api/ssh/agent", json.RawMessage(`{"agent":"codex","action":"connect"}`), "fixture-target")
+	var refused *RemoteError
+	if !errors.As(err, &refused) || refused.Status != 400 || refused.Code != "no_models" || refused.Agent != "Codex" {
+		t.Fatalf("lost model setup failure: %v", err)
 	}
 }
 func TestHostsFailClosedAndValidate(t *testing.T) {

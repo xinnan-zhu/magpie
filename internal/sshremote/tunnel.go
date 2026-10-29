@@ -50,6 +50,14 @@ func (c *Connection) StartTunnel(ctx context.Context, port int, front func(strin
 	if !c.Inspection.Ready || port < 1024 || port > 65535 {
 		return Tunnel{}, errors.New("choose a free remote loopback port between 1024 and 65535")
 	}
+	// The gateway and the agent adapters list the same catalog. Do not set up
+	// an empty upstream that looks ready but cannot connect an agent.
+	if _, err := provider.Stored(); err != nil {
+		return Tunnel{}, err
+	}
+	if models, _ := provider.CatalogFor(""); len(models) == 0 {
+		return Tunnel{}, errors.New("The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.")
+	}
 	k, err := access.NewMachineKey("SSH · " + c.Host.Name)
 	if err != nil {
 		return Tunnel{}, err
@@ -131,6 +139,9 @@ func CheckUpstream(ctx context.Context, in Upstream) (Tunnel, error) {
 	ids := []string{}
 	for _, m := range models.Data {
 		ids = append(ids, m.ID)
+	}
+	if len(ids) == 0 {
+		return Tunnel{}, errors.New("The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.")
 	}
 	id, err := provider.AddSSHUpstream(in.ID, in.Name, base, in.Key, in.Source, ids)
 	return Tunnel{Provider: id, Port: in.Port}, err

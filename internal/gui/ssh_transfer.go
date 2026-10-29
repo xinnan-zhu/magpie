@@ -142,7 +142,7 @@ func sshDesktopOperations(mux *http.ServeMux, desktop func(http.HandlerFunc) htt
 		}
 		gw := served.Load()
 		if gw == nil {
-			http.Error(w, "this desktop must serve the local gateway; use Gateway to take it over first", 409)
+			http.Error(w, "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.", 409)
 			return
 		}
 		out, e := c.StartTunnel(r.Context(), in.Port, gw.SSHFront)

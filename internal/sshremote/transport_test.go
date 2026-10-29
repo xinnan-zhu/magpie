@@ -118,6 +118,44 @@ func fakeSystemSSH(t *testing.T) {
 	t.Setenv("MAGPIE_SSH_FIXTURE", "1")
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 }
+
+func TestSSHAPIRefusalIsConfirmedButLostReplyIsUnknown(t *testing.T) {
+	fakeSystemSSH(t)
+	for _, tc := range []struct {
+		name, reply string
+		uncertain   bool
+	}{
+		{"legacy no_models", `{"error":"remote operation refused (400): {\"agent\":\"Codex\",\"code\":\"no_models\",\"error\":\"Add a provider or subscription in magpie first, then connect Codex\"}"}`, false},
+		{"structured no_models", `{"error":"Add a provider or subscription in magpie first, then connect Codex","failure":{"status":400,"code":"no_models","agent":"Codex","error":"Add a provider or subscription in magpie first, then connect Codex"}}`, false},
+		{"server failure", `{"error":"remote operation refused (500): write failed"}`, true},
+		{"partial write", `{"error":"remote operation refused (400): write failed"}`, true},
+		{"truncated reply", `{"result":`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tc.reply))
+			}))
+			defer remote.Close()
+			t.Setenv("MAGPIE_SSH_FIXTURE_CONTROL", remote.URL)
+			c, err := Connect(context.Background(), Host{Name: "fixture", Target: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			var out json.RawMessage
+			err = c.API(context.Background(), "/api/ssh/agent", map[string]string{"agent": "codex", "action": "connect"}, &out)
+			if err == nil {
+				t.Fatal("failed operation reported success")
+			}
+			if strings.Contains(err.Error(), "result unconfirmed") != tc.uncertain {
+				t.Fatalf("wrong outcome certainty: %v", err)
+			}
+			if !tc.uncertain && err.Error() != "Add a provider or subscription in magpie first, then connect Codex" {
+				t.Fatalf("refusal is not directly readable: %v", err)
+			}
+		})
+	}
+}
 func TestForwardedWebAuthenticatesAndCloses(t *testing.T) {
 	fakeSystemSSH(t)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +258,7 @@ func TestDeployChecksDigestAndArchitectureBeforeSSH(t *testing.T) {
 
 func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
 	fakeSystemSSH(t)
+	put(t, provider.Path(), `{"providers":[{"id":"api","name":"Fixture API","chat":"https://api.example.test/v1","key":"fixture-key","models":["model"]}]}`)
 	// The fake SSH forwards TCP only. This local management fixture stands in
 	// for the remote daemon; Linux socket-table scope is tested separately.
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +330,7 @@ func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ps, err := provider.Stored()
-	if err != nil || len(ps) != 1 || ps[0].Key == "" || ps[0].ID != out.Provider {
+	if err != nil || len(ps) != 2 || ps[1].Key == "" || ps[1].ID != out.Provider {
 		t.Fatal("upstream was not usable", err)
 	}
 	// An explicit retry returns the same provider, never a duplicate.
@@ -300,11 +339,39 @@ func TestSSHReverseTunnelCreatesAuthenticatedUpstreamAndRevokes(t *testing.T) {
 		t.Fatal(again, err)
 	}
 	c.Close()
-	if _, ok := access.Authenticate(ps[0].Key); ok {
+	if _, ok := access.Authenticate(ps[1].Key); ok {
 		t.Fatal("connection close left its key usable")
 	}
 	if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+p, time.Second); err == nil {
 		conn.Close()
 		t.Fatal("reverse listener survived close")
+	}
+}
+
+func TestSSHTunnelRejectsEmptyLocalCatalog(t *testing.T) {
+	fakeSystemSSH(t)
+	c, err := Connect(context.Background(), Host{Name: "fixture", Target: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	started := false
+	_, err = c.StartTunnel(context.Background(), 3431, func(string) http.Handler {
+		started = true
+		return http.NotFoundHandler()
+	})
+	if err == nil || !strings.Contains(err.Error(), "The local gateway has no models") {
+		t.Fatalf("empty local models did not give setup advice: %v", err)
+	}
+	if started || c.tunnel != nil || len(c.forwards) != 0 || len(c.closers) != 0 {
+		t.Fatal("empty catalog started a tunnel or allocated a gateway key")
+	}
+	put(t, provider.Path(), "{broken")
+	_, err = c.StartTunnel(context.Background(), 3431, func(string) http.Handler {
+		started = true
+		return http.NotFoundHandler()
+	})
+	if err == nil || strings.Contains(err.Error(), "has no models") || started {
+		t.Fatalf("unreadable configuration was treated as an empty catalog: %v", err)
 	}
 }

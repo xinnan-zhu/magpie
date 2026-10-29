@@ -12,6 +12,18 @@ import (
 	"github.com/yetone/magpie/internal/sshremote"
 )
 
+func TestSSHRefusalRetainsModelSetupCode(t *testing.T) {
+	rec := httptest.NewRecorder()
+	fail(rec, &sshremote.RemoteError{Status: 400, Code: "no_models", Agent: "Codex", Message: "Add a provider or subscription in magpie first, then connect Codex"})
+	var out map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 400 || out["code"] != "no_models" || out["agent"] != "Codex" {
+		t.Fatalf("SSH lost the remote setup advice: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestSSHConfigHostsDesktopOnly(t *testing.T) {
 	home := sandboxHome(t)
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {

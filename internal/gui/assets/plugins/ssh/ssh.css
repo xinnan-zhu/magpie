@@ -47,6 +47,9 @@ body.web .ssh-nav { display: none !important; }
 .ssh-changes { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
 .ssh-copy-entry { display: grid; gap: 4px; }
 .ssh-copy-entry b { font-size: 12.5px; font-weight: 500; }
+.ssh-feedback { margin: 0; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+.ssh-feedback.err { color: var(--red); }
+.ssh-host-editor .ebody > .ssh-feedback { grid-column: 1 / -1; }
 @media (max-width: 550px) {
   #view-ssh .row.ssh-host, #view-ssh .row.ssh-agent, #view-ssh .row.pref { flex-wrap: wrap; }
   #view-ssh .row.ssh-host > .who { flex: 1 1 calc(100% - 36px); }

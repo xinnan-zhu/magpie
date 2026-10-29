@@ -4,6 +4,36 @@ This record covers the implementation in [SSH management](subsystems/ssh-managem
 It is development verification, not a claim of compatibility with a real SSH
 server, subscription account, or installed Claude Code/Codex version.
 
+## 2026-10-29: setup feedback and missing models
+
+This follow-up used macOS arm64 with Go 1.27.1 and Playwright 1.62.1.
+All operations below used temporary homes and local fixtures.
+
+- Passed the final `ssh.test.cjs` in Chromium and WebKit, all five languages,
+  at 1100/420px. It now exercises gateway ownership refusal, `no_models`,
+  empty copy choices, pending preview controls, preview/apply failures and
+  successful tunnel/copy setup followed by an agent refresh failure.
+- Passed `i18n-keys`, `gui-zh-tw`, `gui-ja`, `gui-de` and
+  `agent-connect-no-models`; the final dictionary ownership check passed again.
+- Passed `go test -tags nogui ./internal/sshremote ./internal/gui -run
+  'TestSSH|TestCoreScriptBudget|TestAgentConnectNoModels' -count=1` and
+  `go vet ./internal/sshremote ./internal/gui`. The tests include the reported
+  Codex error bytes, old/new SSH reply formats, lost replies, partial writes,
+  empty local catalogs and unreadable provider configuration.
+- Replacing `ssh.go` and `tunnel.go` with their base versions through a Go
+  overlay fails `TestSSHAPIRefusalIsConfirmedButLostReplyIsUnknown` and
+  `TestSSHTunnelRejectsEmptyLocalCatalog`. The browser regression also failed
+  before the fix because setup advice was absent from the SSH page.
+- Built the final desktop binary with `go build -tags production` to
+  `/private/tmp/magpie-ssh-debug`. The linker emitted duplicate-library and
+  macOS deployment-target warnings; the build exited 0.
+- The broader `go test -tags nogui ./...` run exited 1, with failures in
+  `internal/gateway` and `internal/provider`. It is not a passing full-suite
+  result. The final focused checks above do not supersede those failures.
+- Not run in this follow-up: the entire browser suite, full/cross-platform
+  vet, Linux/Windows builds, race repetitions, or real SSH/agent/subscription
+  use. No live agent or remote account configuration was changed.
+
 ## Environment and isolation
 
 - macOS arm64; repository toolchain Go **1.26.8**. An earlier run with the

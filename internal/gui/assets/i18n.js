@@ -4,6 +4,8 @@
 // works. {name} slots are filled by t(str, vars).
 const I18N = {
   zh: {
+    "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "本机网关还没有模型。请先在这台电脑上添加供应商或订阅，再重新连接。",
+    "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "本机网关正由另一个 Magpie 进程提供。请退出那个进程后重新连接；如果是旧版本，也可在“网关”页面接管。",
     "Browser access": "浏览器访问",
     "Open magpie in a browser": "在浏览器中打开 magpie",
     "The app serves this window’s page with a key in its link, as magpie web does, while it runs. For a tunnel such as Cloudflare Tunnel, point it at http://127.0.0.1:{port}": "App 运行时会把本窗口的页面提供给浏览器，链接里带着 Key，和 magpie web 一样。用 Cloudflare Tunnel 这类隧道时，把它指向 http://127.0.0.1:{port}",
@@ -4054,6 +4056,8 @@ const I18N = {
     "Where": "位置",
   },
   "zh-TW": {
+    "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "本機閘道還沒有模型。請先在這台電腦上新增供應商或訂閱，再重新連線。",
+    "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "本機閘道正由另一個 Magpie 程序提供。請結束那個程序後重新連線；如果是舊版本，也可在「閘道」頁面接管。",
     "Browser access": "瀏覽器存取",
     "Open magpie in a browser": "在瀏覽器中開啟 magpie",
     "The app serves this window’s page with a key in its link, as magpie web does, while it runs. For a tunnel such as Cloudflare Tunnel, point it at http://127.0.0.1:{port}": "App 執行時會把本視窗的頁面提供給瀏覽器，連結裡帶著 Key，和 magpie web 一樣。用 Cloudflare Tunnel 這類通道時，把它指向 http://127.0.0.1:{port}",
@@ -8089,6 +8093,8 @@ const I18N = {
     "Where": "位置",
   },
   ja: {
+    "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "ローカルゲートウェイにモデルがありません。このコンピュータで先にプロバイダまたはサブスクリプションを追加してから、再接続してください。",
+    "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "ローカルゲートウェイは別の Magpie プロセスが提供しています。そのプロセスを終了して再接続してください。古いバージョンなら「ゲートウェイ」ページで引き継ぐこともできます。",
     "Browser access": "ブラウザからのアクセス",
     "Open magpie in a browser": "ブラウザで magpie を開く",
     "The app serves this window’s page with a key in its link, as magpie web does, while it runs. For a tunnel such as Cloudflare Tunnel, point it at http://127.0.0.1:{port}": "アプリの実行中、このウィンドウのページをブラウザにも提供します。magpie web と同じく、リンクにキーが含まれます。Cloudflare Tunnel などのトンネルは http://127.0.0.1:{port} に向けてください",
@@ -12126,6 +12132,8 @@ const I18N = {
     "Where": "場所",
   },
   de: {
+    "The local gateway has no models. Add a provider or subscription on this computer first, then reconnect.": "Das lokale Gateway hat keine Modelle. Fügen Sie auf diesem Computer zuerst einen Anbieter oder ein Abonnement hinzu und verbinden Sie es erneut.",
+    "Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.": "Ein anderer Magpie-Prozess stellt das lokale Gateway bereit. Beenden Sie ihn und verbinden Sie sich erneut. Eine ältere Version können Sie auch auf der Gateway-Seite übernehmen.",
     "Browser access": "Browserzugriff",
     "Open magpie in a browser": "magpie im Browser öffnen",
     "The app serves this window’s page with a key in its link, as magpie web does, while it runs. For a tunnel such as Cloudflare Tunnel, point it at http://127.0.0.1:{port}": "Solange die App läuft, liefert sie die Seite dieses Fensters auch an Browser aus, mit einem Schlüssel im Link, wie magpie web. Einen Tunnel wie Cloudflare Tunnel richtest du auf http://127.0.0.1:{port}",

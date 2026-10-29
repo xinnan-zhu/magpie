@@ -1,5 +1,8 @@
 magpie.strings({
   "zh": {
+    "The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.": "远端 Magpie 还没有模型。请先接入本机网关、复制 API 供应商，或在远端 Web 页面添加供应商。",
+    "No API providers or routing groups can be copied. Subscriptions use the local gateway instead.": "没有可复制的 API 供应商或路由组。订阅请通过本机网关使用。",
+    "Working…": "正在处理…",
     "Remote proxy": "远端代理",
     "From the SSH session": "来自 SSH 会话",
     "From the systemd user environment": "来自 systemd 用户环境",
@@ -52,6 +55,9 @@ magpie.strings({
     "Configuration copied": "配置已复制"
   },
   "zh-TW": {
+    "The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.": "遠端 Magpie 還沒有模型。請先接入本機閘道、複製 API 供應商，或在遠端 Web 頁面新增供應商。",
+    "No API providers or routing groups can be copied. Subscriptions use the local gateway instead.": "沒有可複製的 API 供應商或路由群組。訂閱請透過本機閘道使用。",
+    "Working…": "正在處理…",
     "Remote proxy": "遠端代理",
     "From the SSH session": "來自 SSH 工作階段",
     "From the systemd user environment": "來自 systemd 使用者環境",
@@ -104,6 +110,9 @@ magpie.strings({
     "Configuration copied": "設定已複製"
   },
   "ja": {
+    "The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.": "リモートの Magpie にモデルがありません。先にローカルゲートウェイへ接続するか、API プロバイダをコピーするか、リモート Web ページでプロバイダを追加してください。",
+    "No API providers or routing groups can be copied. Subscriptions use the local gateway instead.": "コピーできる API プロバイダやルーティンググループがありません。サブスクリプションはローカルゲートウェイ経由で利用してください。",
+    "Working…": "処理中…",
     "Remote proxy": "リモートのプロキシ",
     "From the SSH session": "SSH セッションから",
     "From the systemd user environment": "systemd のユーザー環境から",
@@ -156,6 +165,9 @@ magpie.strings({
     "Configuration copied": "設定をコピーしました"
   },
   "de": {
+    "The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.": "Das entfernte Magpie hat keine Modelle. Verbinden Sie zuerst das lokale Gateway, kopieren Sie API-Anbieter oder fügen Sie auf der entfernten Web-Seite einen Anbieter hinzu.",
+    "No API providers or routing groups can be copied. Subscriptions use the local gateway instead.": "Keine API-Anbieter oder Routing-Gruppen zum Kopieren vorhanden. Abonnements werden über das lokale Gateway genutzt.",
+    "Working…": "Wird verarbeitet…",
     "Remote proxy": "Entfernter Proxy",
     "From the SSH session": "Aus der SSH-Sitzung",
     "From the systemd user environment": "Aus der systemd-Benutzerumgebung",

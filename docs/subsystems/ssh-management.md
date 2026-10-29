@@ -154,6 +154,9 @@ These modes coexist. None clears existing remote providers or enables LAN.
    inference; retrying a pending creation uses the same upstream identity.
    Closing SSH revokes its key, but leaves the remote provider and picks in
    place, unavailable until reconnect. It adds no fallback.
+   An empty local model catalog is refused before allocating a machine key
+   or starting a tunnel. The remote verification also rejects an empty model
+   list rather than creating an upstream that cannot connect an agent.
 3. **Copy selected setup.** [`SelectCopy`, `PlanImport`, `ApplyImport`](../../internal/provider/ssh_import.go)
    use a portable subset of the existing providers/groups model. Only API
    providers and explicit routing groups are supported; every dependency must
@@ -206,7 +209,18 @@ still need the manual checks in [the validation record](../ssh-validation.md).
 The GUI reports authentication/trust/forwarding failures without echoing SSH
 configuration or credentials. Operations are bounded and canceled with the
 connection. Mutations are never silently retried; an uncertain result asks for
-refresh. Provider import is atomic within providers.json; agent mutations retain
+refresh. Known precondition refusals (including `no_models`) retain their
+error code and agent name instead of being called uncertain. Protocol 1 replies
+carry an optional structured `failure` alongside the legacy `error`; new clients
+also read the old HTTP-refusal text, so an existing remote installation can
+still explain missing models. A generic 400 write failure, 5xx, or lost/invalid
+reply remains uncertain. Tunnel, copy and disconnect dialogs keep pending and
+failure feedback inside the dialog. Copying requires at least one selection;
+an empty list explains that subscriptions use the local gateway. Agent errors
+remain on the page and say which model-source setup is needed.
+Successful tunnel/copy setup remains visible if the subsequent agent refresh
+fails; that read failure is shown on the page and can be refreshed separately.
+Provider import is atomic within providers.json; agent mutations retain
 the existing adapters' file-level guarantees, not a new cross-file transaction.
 Machine keys can be revoked in the existing `magpie gateway-key list|remove <id>` CLI; after a crash,
 remove abandoned SSH keys there before creating another connection.

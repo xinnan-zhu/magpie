@@ -13,6 +13,9 @@ magpie.plugin("ssh", (ctx) => {
   // agents is null until the connected host's are read; useProxy is whether
   // a service installed now is given the proxy found on the host
   let useProxy = true, page, hosts = [], selected = "", connecting = "", connection = null, generation = 0, busy = false, installing = false, agents = null, tunnel = null, tunnelPort = 3431;
+  let problem = "";
+  const errorMessage = (e) => e.code === "no_models"
+    ? t("The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.") : t(e.message);
   const endpoint = (part, c = connection) => "ssh/connections/" + encodeURIComponent(c.id) + "/" + part;
   const editing = (ed) => ed.isConnected && !document.getElementById("modal").hidden && !document.getElementById("modal").classList.contains("out");
   function editor(title, cls = "") {
@@ -24,6 +27,18 @@ magpie.plugin("ssh", (ctx) => {
   function foot(ed, ...buttons) {
     const bar = el("div", "bar"); bar.append(el("span", "grow"), ...buttons); ed.append(bar);
   }
+  // Keep the result beside the operation, including when the window's footer
+  // is outside the visible area. A failed dialog stays open for correction.
+  function feedback(ed, message, error = false) {
+    let note = ed.querySelector(".ssh-feedback");
+    if (!note) {
+      note = el("p", "ssh-feedback");
+      (ed.querySelector(":scope > .ebody") || ed).append(note);
+    }
+    note.textContent = message; note.hidden = !message;
+    note.classList.toggle("err", error);
+    note.setAttribute("role", error ? "alert" : "status");
+  }
   // a dot and the words beside it, as an agent's line under its name says its state
   function stateLine(words, kind = "") {
     const line = el("div", "ag-st ssh-st" + (kind ? " " + kind : ""));
@@ -33,9 +48,9 @@ magpie.plugin("ssh", (ctx) => {
   async function perform(fn) {
     if (busy) return;
     const g = generation;
-    busy = true; draw();
+    busy = true; problem = ""; draw();
     try { await fn(g); }
-    catch (e) { if (g === generation) status(e.message, "err"); }
+    catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
     finally { if (g === generation) { busy = false; draw(); } }
   }
   function action(label, fn, cls = "text action") {
@@ -43,7 +58,7 @@ magpie.plugin("ssh", (ctx) => {
     b.disabled = busy; return b;
   }
   async function forget() {
-    generation++; busy = false; installing = false; connecting = ""; agents = null; tunnel = null; useProxy = true;
+    generation++; busy = false; problem = ""; installing = false; connecting = ""; agents = null; tunnel = null; useProxy = true;
     const old = connection; connection = null;
     if (old) await fetch("/api/ssh/connections/" + encodeURIComponent(old.id), { method: "DELETE" });
   }
@@ -61,6 +76,13 @@ magpie.plugin("ssh", (ctx) => {
     const c = connection, out = await api(endpoint("agents", c));
     if (g === generation && c === connection) agents = out;
   }
+  // A completed setup remains visible even if the following agent read fails.
+  async function refreshAgents(g) {
+    if (g !== generation) return;
+    try { await readAgents(g); }
+    catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
+    finally { if (g === generation) draw(); }
+  }
   // a ready host's agents are read with it, as the Agents page lists them
   async function connect(g) {
     const c = await api("ssh/connections", { host: selected });
@@ -68,7 +90,7 @@ magpie.plugin("ssh", (ctx) => {
     const old = connection; connection = c;
     if (old) await fetch("/api/ssh/connections/" + old.id, { method: "DELETE" });
     if (g !== generation) return; agents = null;
-    if (c.inspection.ready) await readAgents(g).catch((e) => { if (g === generation) status(e.message, "err"); });
+    if (c.inspection.ready) await refreshAgents(g);
   }
   // one host is connected at a time: another's Connect lets the first go
   async function open(h) {
@@ -121,11 +143,11 @@ magpie.plugin("ssh", (ctx) => {
     ed.append(el("div", "hint", t("Leave empty to use the managed install, then the remote PATH")));
     ed.append(el("p", "ssh-say", t("Use a trusted SSH alias or user@host. OpenSSH handles keys, ssh-agent and jump hosts. Authenticate in a terminal first.")));
     const cancel = button(t("Cancel"), closeModal), save = button(t("Save"), async () => {
-      save.disabled = cancel.disabled = true;
+      save.disabled = cancel.disabled = true; feedback(ed, t("Working…"));
       try {
         const h = await api("ssh/hosts", { id: existing.id || "", name: inputs.name.value, target: inputs.target.value, port: Number(inputs.port.value) || 0, binary: inputs.binary.value });
         if (!editing(ed)) return; existing = h; if (connection?.host.id === h.id) await forget(); selected = h.id; await load(); if (editing(ed)) closeModal();
-      } catch (e) { if (editing(ed)) status(e.message, "err"); }
+      } catch (e) { if (editing(ed)) feedback(ed, errorMessage(e), true); }
       finally { save.disabled = cancel.disabled = false; }
     }, "text primary");
     foot(ed, cancel, save); openModal(ed); inputs.name.focus({ preventScroll: true });
@@ -148,6 +170,8 @@ magpie.plugin("ssh", (ctx) => {
     if (g !== generation || bound !== connection) return;
     const ed = editor(t("Copy selected configuration"), "ssh-copy"), picks = { providers: [], groups: [] };
     ed.append(el("p", "ssh-say", t("Adds copies beside existing entries. Copies endpoints, model picks and basic routing. Sign-ins, proxies, paths, advanced request settings and network settings stay on their own computer.")));
+    const hasChoices = choices.providers.length + choices.groups.length > 0;
+    if (!hasChoices) ed.append(el("p", "ssh-say", t("No API providers or routing groups can be copied. Subscriptions use the local gateway instead.")));
     // each kind its own list of rows, as a settings group
     for (const [kind, title] of [["providers", "Providers"], ["groups", "Routing groups"]]) {
       if (!choices[kind].length) continue;
@@ -163,7 +187,7 @@ magpie.plugin("ssh", (ctx) => {
     keyRow.append(keys, el("span", "name", t("Include API keys explicitly"))); keyList.append(keyRow); ed.append(keyList);
     const preview = button(t("Preview"), async () => {
       if (g !== generation || bound !== connection) return closeModal();
-      preview.disabled = true;
+      preview.disabled = true; for (const input of selectControls) input.disabled = true; feedback(ed, t("Working…"));
       try {
         const ids = (kind) => picks[kind].filter(([input]) => input.checked).map(([, id]) => id);
         const plan = await api(endpoint("copy/preview", bound), { providers: ids("providers"), groups: ids("groups"), keys: keys.checked });
@@ -179,14 +203,19 @@ magpie.plugin("ssh", (ctx) => {
         sure.append(changes, stateLine(t(plan.keys ? "API keys will be copied" : "API keys will stay here"), plan.keys ? "wait" : ""));
         const apply = button(t("Apply"), async () => {
           if (g !== generation || bound !== connection) return closeModal();
-          apply.disabled = true;
-          try { await api(endpoint("copy/apply", bound), { id: plan.id }); if (g !== generation || bound !== connection || !editing(sure)) return; await closeModal(); status(t("Configuration copied")); await readAgents(g); draw(); }
-          catch (e) { if (editing(sure)) status(e.message, "err"); }
+          apply.disabled = true; feedback(sure, t("Working…"));
+          try { await api(endpoint("copy/apply", bound), { id: plan.id }); if (g !== generation || bound !== connection || !editing(sure)) return; await closeModal(); status(t("Configuration copied")); await refreshAgents(g); }
+          catch (e) { if (editing(sure)) feedback(sure, errorMessage(e), true); }
           finally { apply.disabled = false; }
         }, "text primary");
         foot(sure, button(t("Cancel"), closeModal), apply); openModal(sure); apply.focus({ preventScroll: true });
-      } catch (e) { status(e.message, "err"); preview.disabled = false; }
+      } catch (e) { if (editing(ed)) feedback(ed, errorMessage(e), true); }
+      finally { for (const input of selectControls) input.disabled = false; preview.disabled = !selectedAny(); }
     }, "text primary");
+    const selectControls = [...Object.values(picks).flatMap((items) => items.map(([input]) => input)), keys];
+    const selectedAny = () => Object.values(picks).some((items) => items.some(([input]) => input.checked));
+    preview.disabled = true;
+    for (const items of Object.values(picks)) for (const [input] of items) input.onchange = () => { preview.disabled = !selectedAny(); };
     foot(ed, button(t("Cancel"), closeModal), preview); openModal(ed);
   }
   async function disconnectAgent(g, a) {
@@ -196,9 +225,9 @@ magpie.plugin("ssh", (ctx) => {
     ed.append(changesList(out.changes));
     const apply = button(t("Disconnect"), async () => {
       if (g !== generation || bound !== connection) return closeModal();
-      apply.disabled = true;
+      apply.disabled = true; feedback(ed, t("Working…"));
       try { const result = await api(endpoint("agent", bound), { agent: a.id, action: "disconnect", revision: out.revision }); if (g !== generation || bound !== connection || !editing(ed)) return; agents = result.agents; closeModal(); draw(); }
-      catch (e) { if (editing(ed)) status(e.message, "err"); }
+      catch (e) { if (editing(ed)) feedback(ed, errorMessage(e), true); }
       finally { apply.disabled = false; }
     }, "text primary");
     foot(ed, button(t("Cancel"), closeModal), apply); openModal(ed);
@@ -231,12 +260,12 @@ magpie.plugin("ssh", (ctx) => {
       port.id = "ssh-tunnel-port"; label.htmlFor = port.id;
       const field = el("div", "ssh-port"); field.append(label, port); ed.append(field);
       const start = button(t("Connect"), async () => {
-        start.disabled = true;
+        start.disabled = true; feedback(ed, t("Connecting…"));
         try {
           const out = await api(endpoint("tunnel", bound), { port: Number(port.value) });
           if (g !== generation || bound !== connection) return;
-          tunnelPort = Number(port.value); tunnel = out; if (editing(ed)) closeModal(); await readAgents(g); draw();
-        } catch (e) { if (editing(ed)) status(e.message, "err"); }
+          tunnelPort = Number(port.value); tunnel = out; if (editing(ed)) closeModal(); await refreshAgents(g);
+        } catch (e) { if (editing(ed)) feedback(ed, errorMessage(e), true); }
         finally { start.disabled = false; }
       }, "text primary");
       foot(ed, button(t("Cancel"), closeModal), start);
@@ -322,7 +351,7 @@ magpie.plugin("ssh", (ctx) => {
         const g = generation, bound = connection;
         busy = true; draw();
         try { const out = await api(endpoint("pick", bound), { agent: a.id, field: f.key, value }); if (g === generation) { agents = out.agents; if (out.notice) status(out.notice); } }
-        catch (e) { if (g === generation) status(e.message, "err"); }
+        catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
         finally { if (g === generation) { busy = false; draw(); } }
       }));
     }
@@ -338,6 +367,7 @@ magpie.plugin("ssh", (ctx) => {
     if (!page) return;
     page.replaceChildren();
     if (window.bootPrefs?.web) { page.append(el("p", "set-none", t("SSH management is available in the desktop app"))); return; }
+    if (problem) { const note = el("p", "ssh-feedback err", problem); note.setAttribute("role", "alert"); page.append(note); }
     const list = el("div", "list ssh-hosts"); page.append(list);
     if (!hosts.length) {
       const empty = el("div", "empty-state"); empty.append(el("b", "", t("No SSH hosts yet")), el("span", "", t("Manage another computer's Magpie through system SSH")));

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -108,8 +107,33 @@ type Request struct {
 	Body   json.RawMessage `json:"body,omitempty"`
 }
 type Response struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   string          `json:"error,omitempty"`
+	Failure *RemoteError    `json:"failure,omitempty"`
+}
+
+// RemoteError preserves a completed Web refusal across the SSH control hop.
+// Error remains in Response too so older clients can still read the reply.
+type RemoteError struct {
+	Status  int    `json:"status"`
+	Message string `json:"error"`
+	Code    string `json:"code,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+}
+
+func (e *RemoteError) Error() string { return e.Message }
+
+func remoteError(status int, body []byte) *RemoteError {
+	e := &RemoteError{Status: status, Message: strings.TrimSpace(string(body))}
+	var detail struct {
+		Message string `json:"error"`
+		Code    string `json:"code"`
+		Agent   string `json:"agent"`
+	}
+	if json.Unmarshal(body, &detail) == nil && detail.Message != "" {
+		e.Message, e.Code, e.Agent = detail.Message, detail.Code, detail.Agent
+	}
+	return e
 }
 
 // ServeControl is an early CLI entry point. Reads never run ordinary CLI startup.
@@ -209,6 +233,7 @@ func ServeControl(ctx context.Context, in io.Reader, out io.Writer, version stri
 	response := Response{}
 	if err != nil {
 		response.Error = err.Error()
+		errors.As(err, &response.Failure)
 	} else {
 		response.Result, err = json.Marshal(result)
 		if err != nil {
@@ -315,7 +340,7 @@ func webCall(ctx context.Context, path string, body json.RawMessage, targets ...
 		return nil, errors.New("SSH reply is too large")
 	}
 	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("remote operation refused (%d): %s", res.StatusCode, strings.TrimSpace(string(b)))
+		return nil, remoteError(res.StatusCode, b)
 	}
 	if !json.Valid(b) {
 		return nil, errors.New("invalid remote response")

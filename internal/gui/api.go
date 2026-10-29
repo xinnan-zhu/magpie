@@ -49,6 +49,7 @@ import (
 	"github.com/yetone/magpie/internal/redact"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/sshremote"
 	"github.com/yetone/magpie/internal/update"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -2730,6 +2731,10 @@ func fail(rw http.ResponseWriter, err error) {
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(http.StatusBadRequest)
 	out := map[string]string{"error": err.Error()}
+	var remote *sshremote.RemoteError
+	if errors.As(err, &remote) {
+		out["code"], out["agent"] = remote.Code, remote.Agent
+	}
 	var unavailable *agent.RuntimeUnavailableError
 	if errors.As(err, &unavailable) {
 		out["code"] = "runtime_unavailable"

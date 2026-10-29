@@ -134,8 +134,8 @@ async function api(path, body, heads, signal) {
   }
   if (!res.ok) {
     const err = new Error(data?.error || `${res.status} ${res.statusText}`);
+    err.code = data?.code;
     if (data?.code === "runtime_unavailable") {
-      err.code = data.code;
       if (data.offline === "stage" || data.offline === "disconnect") err.offline = data.offline;
     }
     // magpie has no models to connect an agent to yet: said in the
@@ -143,7 +143,6 @@ async function api(path, body, heads, signal) {
     if (data?.code === "no_models") err.message = t("Add a provider or subscription in magpie first, then connect {agent}", { agent: data.agent });
     // magpie has models, and none is left in the agent's model list (#1989)
     if (data?.code === "all_hidden") {
-      err.code = data.code;
       err.message = t("None of magpie's models is left in {agent}'s model list: pick one under Model list → Pick, then connect {agent}", { agent: data.agent });
     }
     if (data?.why) err.why = data.why; // a failed move's reason, said in the reader's language
@@ -151,12 +150,10 @@ async function api(path, body, heads, signal) {
     // an account the agent is signed in to, refused removal while it has
     // another: said in the reader's language
     if (data?.code === "signed_in") {
-      err.code = data.code;
       err.message = t("{agent} is signed in to {user} now: sign it in to another of its accounts first (Use on that account), then remove this one", { agent: { codex: "Codex", claude: "Claude Code" }[data.agent] || data.agent, user: data.user });
     }
     // a text Import can't add as a routing group (laincatx on X)
     if (data?.code === "share") {
-      err.code = data.code;
       err.message = {
         newer: t("This group was shared from a newer magpie (format {n}): update magpie to import it", { n: data.format }),
         no_format: t("This shared group says no format it is in: copy it again with Copy to share"),
@@ -168,7 +165,6 @@ async function api(path, body, heads, signal) {
     // administrator, or RTK's winget for every user, the prompt declined or
     // not to be had (新v学员 on Discord): what to do, in the reader's language
     if (data?.code === "needs_admin") {
-      err.code = data.code;
       const v = { agent: data.agent, prefix: data.prefix, cmd: data.command, why: data.reason || "" };
       const where = data.prefix
         ? (data.canceled

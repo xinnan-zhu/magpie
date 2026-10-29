@@ -122,6 +122,18 @@ func Call(ctx context.Context, h Host, req Request, out any) error {
 		return &SSHError{"invalid_reply", "The remote shell returned an invalid SSH control reply"}
 	}
 	if response.Error != "" {
+		if response.Failure != nil {
+			return response.Failure
+		}
+		// Protocol 1 peers before structured failures embedded the HTTP reply
+		// in Error. Keep their refusal and no_models code readable as well.
+		if tail, ok := strings.CutPrefix(response.Error, "remote operation refused ("); ok {
+			if code, body, ok := strings.Cut(tail, "): "); ok {
+				if status, err := strconv.Atoi(code); err == nil && status >= 400 && status < 600 {
+					return remoteError(status, []byte(body))
+				}
+			}
+		}
 		return errors.New(response.Error)
 	}
 	return json.Unmarshal(response.Result, out)
@@ -268,7 +280,11 @@ func (c *Connection) API(ctx context.Context, path string, body any, out any) er
 		req.Body = b
 	}
 	err := c.Call(ctx, req, out)
-	if err != nil && body != nil {
+	var refusal *RemoteError
+	// The remote API also uses 400 for file-write failures, which may be
+	// partial. Only known preconditions establish that no mutation ran.
+	confirmed := errors.As(err, &refusal) && (refusal.Status == 401 || refusal.Status == 403 || refusal.Status == 404 || refusal.Status == 409 || refusal.Status == 400 && (refusal.Code == "no_models" || refusal.Code == "all_hidden"))
+	if err != nil && body != nil && !confirmed {
 		return fmt.Errorf("remote result unconfirmed; refresh before another action: %w", err)
 	}
 	return err

@@ -16,12 +16,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       const context = await browser.newContext({viewport:{width,height:820},reducedMotion:'reduce'});
       const page = await context.newPage(); page.setDefaultTimeout(5000);
       const errors = [], posted = [];
-      let configState = 'ready', remoteMode = 'ready', failDeploy = false;
+      let configState = 'ready', remoteMode = 'ready', failDeploy = false, failTunnel = true, failPreview = true, failApply = true, failAgent = true, emptyChoices = false, failRefresh = false;
       let pauseHostRefresh = false, releaseHostRefresh;
       const hostRefreshGate = new Promise(resolve => { releaseHostRefresh = resolve; });
       page.on('pageerror', e => errors.push(e.message));
       const hosts = [{id:'a',name:'Fixture A',target:'user@fixture-a'},{id:'b',name:'Fixture B',target:'fixture-b'}];
       const agents = [{id:'claude',name:'Claude Code',path:'/remote/.claude/settings.json',wired:false,fields:[{key:'model',value:'magpie/api/one',options:[{value:'magpie/api/one',label:'One'},{value:'magpie/api/two',label:'Two'}]}]}];
+      let releasePreview;
+      const previewGate = new Promise(resolve => { releasePreview = resolve; });
       let resolveConnect;
       const held = new Promise(resolve => { resolveConnect = resolve; });
       await page.route('**/*', async route => {
@@ -54,14 +56,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
           return json(true);
         }
         if(url.pathname.endsWith('/service')) { remoteMode = 'ready'; return json({}); }
+        if(url.pathname.endsWith('/agents') && failRefresh) { failRefresh = false; return route.fulfill({status:400,json:{error:'fixture: could not refresh agents'}}); }
         if(url.pathname.endsWith('/agents')) return json(agents);
         if(url.pathname.endsWith('/pick')) { agents[0].fields[0].value=req.postDataJSON().value; return json({agents}); }
+        if(url.pathname.endsWith('/agent') && failAgent) return route.fulfill({status:400,json:{code:'no_models',agent:'Claude Code',error:'Add a provider or subscription in magpie first, then connect Claude Code'}});
         if(url.pathname.endsWith('/agent')) { agents[0].wired = req.postDataJSON().action === 'connect'; return json({agents}); }
         if(url.pathname.endsWith('/preview/claude')) return json({revision:'fixture-revision',changes:[{path:'/remote/.claude/settings.json',lines:[{op:'+',text:'"model": "magpie/api/two"'}]}]});
-        if(url.pathname.endsWith('/tunnel')) return json({provider:'ssh-fixture',port:3431});
-        if(url.pathname === '/api/ssh/copy-choices') return json({providers:[{id:'api',name:'API fixture'}],groups:[]});
+        if(url.pathname.endsWith('/tunnel') && failTunnel) return route.fulfill({status:409,body:'Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.'});
+        if(url.pathname.endsWith('/tunnel')) { failRefresh = true; return json({provider:'ssh-fixture',port:3431}); }
+        if(url.pathname === '/api/ssh/copy-choices') return json({providers:emptyChoices ? [] : [{id:'api',name:'API fixture'}],groups:[]});
+        if(url.pathname.endsWith('/copy/preview') && failPreview) { await previewGate; return route.fulfill({status:400,json:{error:'fixture: select the group dependency too'}}); }
         if(url.pathname.endsWith('/copy/preview')) return json({id:'operation-fixture',ids:{api:'api-ssh'},keys:req.postDataJSON().keys});
-        if(url.pathname.endsWith('/copy/apply')) return json({ids:{api:'api-ssh'}});
+        if(url.pathname.endsWith('/copy/apply') && failApply) return route.fulfill({status:400,json:{error:'fixture: preview this selection again'}});
+        if(url.pathname.endsWith('/copy/apply')) { failRefresh = true; return json({ids:{api:'api-ssh'}}); }
         if(url.pathname.startsWith('/api/')) return json({});
         if(url.host !== 'magpie.test') return route.fulfill({status:404,body:''});
         const file = path.join(assets,url.pathname === '/' ? 'index.html' : url.pathname);
@@ -140,6 +147,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       assert.equal(await page.locator('dialog[open]').count(),0,'ordinary pick needed no confirmation');
       // on connects at once; off first shows what goes, and Cancel leaves it connected
       await agent.getByRole('switch').click();
+      await view.getByRole('alert').filter({hasText:words('The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.')}).waitFor();
+      assert.equal(await agent.getByRole('switch').getAttribute('aria-checked'),'false');
+      failAgent = false;
+      await agent.getByRole('switch').click();
       await page.waitForFunction(() => document.querySelector('.ssh-agent[data-id="claude"] [role=switch]')?.getAttribute('aria-checked') === 'true');
       assert.ok(posted.some(([p,b]) => p.endsWith('/snapshot-a/agent') && b.action === 'connect'));
       await agent.getByRole('switch').click();
@@ -151,19 +162,42 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       const source = view.locator('.row.pref').filter({hasText:words('Use local gateway')});
       await source.getByRole('button',{name:words('Connect'),exact:true}).click();
       await page.locator('.ssh-editor').getByRole('button',{name:words('Connect'),exact:true}).click();
+      await page.locator('.ssh-editor').getByRole('alert').filter({hasText:words('Another Magpie process serves the local gateway. Quit that process and reconnect, or take over an older version on the Gateway page.')}).waitFor();
+      failTunnel = false;
+      await page.locator('.ssh-editor').getByRole('button',{name:words('Connect'),exact:true}).click();
+      await view.getByRole('alert').filter({hasText:'fixture: could not refresh agents'}).waitFor();
       await source.getByRole('button',{name:words('Details'),exact:true}).click();
       await page.getByText('magpie ssh-direct ssh-fixture claude <provider/model>',{exact:true}).waitFor();
       await page.locator('.ssh-editor').getByRole('button',{name:words('Close'),exact:true}).click();
       await view.locator('.row.pref').filter({hasText:words('Copy selected configuration')}).getByRole('button',{name:words('Select'),exact:true}).click();
       const modal = page.locator('#modal');
+      assert.equal(await modal.getByRole('button',{name:words('Preview'),exact:true}).isDisabled(),true,'a selection is required');
       await modal.locator('.ssh-check').filter({hasText:'API fixture'}).click();
       assert.equal(await modal.getByRole('checkbox').last().isChecked(),false,'keys default off');
+      await modal.getByRole('button',{name:words('Preview'),exact:true}).click();
+      await modal.getByRole('status').filter({hasText:words('Working…')}).waitFor();
+      assert.equal(await modal.getByRole('button',{name:words('Preview'),exact:true}).isDisabled(),true);
+      assert.equal(await modal.getByRole('checkbox').first().isDisabled(),true,'selection stays fixed while planning');
+      releasePreview();
+      await modal.getByRole('alert').filter({hasText:'fixture: select the group dependency too'}).waitFor();
+      failPreview = false;
       await modal.getByRole('button',{name:words('Preview'),exact:true}).click();
       await modal.getByText('api → api-ssh',{exact:true}).waitFor();
       assert.equal(posted.filter(([p]) => p.endsWith('/copy/apply')).length,0,'preview did not apply');
       await modal.getByRole('button',{name:words('Apply'),exact:true}).click();
+      await modal.getByRole('alert').filter({hasText:'fixture: preview this selection again'}).waitFor();
+      failApply = false;
+      await modal.getByRole('button',{name:words('Apply'),exact:true}).click();
       await page.waitForFunction(() => document.querySelector('#modal').hidden);
-      assert.equal(posted.filter(([p]) => p.endsWith('/copy/apply')).length,1);
+      assert.equal(posted.filter(([p]) => p.endsWith('/copy/apply')).length,2);
+      await view.getByRole('alert').filter({hasText:'fixture: could not refresh agents'}).waitFor();
+      await view.getByRole('button',{name:words('Refresh'),exact:true}).click();
+      await page.waitForFunction(() => !document.querySelector('#view-ssh [role=alert]'));
+      emptyChoices = true;
+      await view.locator('.row.pref').filter({hasText:words('Copy selected configuration')}).getByRole('button',{name:words('Select'),exact:true}).click();
+      await modal.getByText(words('No API providers or routing groups can be copied. Subscriptions use the local gateway instead.'),{exact:true}).waitFor();
+      assert.equal(await modal.getByRole('button',{name:words('Preview'),exact:true}).isDisabled(),true);
+      await modal.getByRole('button',{name:words('Cancel'),exact:true}).click();
       assert.equal(posted.find(([p]) => p.endsWith('/copy/preview'))[1].keys,false);
       assert.ok(await view.evaluate(v => v.scrollWidth <= v.clientWidth + 1),`${lang} ${width}: no horizontal overflow`);
       assert.deepEqual(errors,[],`${lang} ${width}`);
