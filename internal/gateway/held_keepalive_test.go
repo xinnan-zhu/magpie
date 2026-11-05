@@ -164,8 +164,9 @@ func TestClientGoneRecordedAsCanceled(t *testing.T) {
 	}
 
 	// Claude Code's run stopped mid-reply, written to the holdWriter the
-	// gateway gives it: relay still ends the stream it was encoding
-	// (message_stop), which isn't the reply made whole
+	// gateway gives it: the stream's termination isn't a whole reply.
+	// If stdout drains before abort closes the segment, the interrupted
+	// run emits #4822's error; otherwise relay writes message_stop.
 	fakeClaudeCalling(t)
 	s := New()
 	t.Cleanup(s.subscription.abortAll)
@@ -188,8 +189,14 @@ func TestClientGoneRecordedAsCanceled(t *testing.T) {
 	body := `{"model":"claude-sonnet-5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hang on"}]}`
 	var u Usage
 	s.serveClaudeSubscription(h, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)).WithContext(ctx), provider.Anthropic, p, "claude-sonnet-5", []byte(body), &u)
-	if !strings.Contains(rec.Body.String(), "thinking it over") || !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Fatalf("the run's reply: %q", rec.Body.String())
+	reply := rec.Body.String()
+	terminal := strings.Contains(reply, "event: message_stop")
+	if strings.Contains(reply, "event: error") {
+		terminal = !terminal && strings.Contains(reply, `"type":"api_error"`) &&
+			strings.Contains(reply, "was ended by magpie before it ended its reply")
+	}
+	if !strings.Contains(reply, "thinking it over") || !terminal {
+		t.Fatalf("the run's reply: %q", reply)
 	}
 	if h.ended {
 		t.Fatal("a Claude Code run stopped as its agent left taken as a whole reply, recorded as a 200")
