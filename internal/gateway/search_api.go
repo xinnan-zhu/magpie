@@ -11,11 +11,16 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // When no provider can search, magpie's web_search tool is answered by a
@@ -62,9 +67,10 @@ func Searcher() string {
 }
 
 // searcherName is a searcher by its provider and model; a Kimi Code plan,
-// which searches with no model, by its name.
+// which searches with no model, and a ChatGPT account by the backend's
+// search, by its name.
 func searcherName(p provider.Provider, model string) string {
-	if model == "" {
+	if model == "" || model == codexSearchModel {
 		return p.Name
 	}
 	if e, ok := provider.ServedEntryOf(p.ID + "/" + model); ok && e.Name != "" {
@@ -90,7 +96,7 @@ func AutoSearcher() string {
 // searches with no model (a Kimi Code plan's search service).
 func NamedSearchModel() string {
 	p, m, why := chosenSearcher()
-	if p == nil || why != "" || m == "" {
+	if p == nil || why != "" || m == "" || m == codexSearchModel {
 		return ""
 	}
 	return p.ID + "/" + m
@@ -131,6 +137,9 @@ func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, er
 // turned away; #1477), which then rests (searchRestFor). Anything else, such as
 // no answer in time, isn't about the key, and the next isn't tried.
 func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" && v.Auth != "" {
+		return s.askSearchSignedIn(ctx, a, v, query)
+	}
 	keys := a.Keys()
 	if len(keys) == 0 {
 		keys = []string{""}
@@ -139,9 +148,12 @@ func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, que
 	for _, i := range searchKeyOrder(a, keys, time.Now()) {
 		one := a
 		one.Key = keys[i]
+		ctx, _ := withSearchWire(ctx, one.Key)
 		ctx, cancel := context.WithTimeout(ctx, searchTimeout/4)
+		start := time.Now()
 		pages, err := s.askSearchAPI(ctx, one, query)
 		cancel()
+		s.logSearchAPI(ctx, one, query, start, len(pages), err)
 		if err == nil {
 			wakeSearchKey(a.Vendor, keys[i])
 			return pages, nil
@@ -161,6 +173,61 @@ func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, que
 		}
 	}
 	return nil, errors.Join(errs...)
+}
+
+// logSearchAPI writes the request log's row of one ask of a search API
+// with one key (usage.SourceSearch; cybercaius on Discord: which search
+// API each search used, and how much, couldn't be seen): the API by name,
+// where it was asked, the key masked, how long it took and how it ended.
+func (s *Server) logSearchAPI(ctx context.Context, a provider.SearchAPI, query string, start time.Time, found int, err error) {
+	rec := usage.Record{Requested: a.Name(), Host: provider.HostOf(a.Base())}
+	if a.Key != "" {
+		rec.ProviderKeyID, rec.ProviderKeyName = searchKeyID(a.Vendor, a.Key), provider.MaskSearchKey(a.Key)
+	}
+	s.logSearch(ctx, rec, query, start, found, err)
+}
+
+// logSearch writes rec, a search magpie ran with a search API or a plan's
+// own search service, as the request log's row of it: the agent it was
+// for, how long it took and how it ended (200, the API's refusal, the
+// error, "found nothing"). The query is never kept, nor said in the
+// error: the row may go to another computer the usage syncs with. The
+// ask is a request of the Routing page's and Recent calls', its exchange
+// kept by the request archive when it is on (keepSearch).
+func (s *Server) logSearch(ctx context.Context, rec usage.Record, query string, start time.Time, found int, err error) {
+	rec.Time, rec.Agent, rec.Kind, rec.Source = start, "magpie", "web_search", usage.SourceSearch
+	rec.Millis = time.Since(start).Milliseconds()
+	if f := searchFor(ctx); f != nil && f.Agent != "" {
+		rec.Agent = f.Agent
+	}
+	who := access.Caller(ctx)
+	rec.CallerKeyID, rec.CallerKeyName, rec.CallerIssuerID = who.KeyID, who.KeyName, who.IssuerID()
+	switch {
+	case err != nil && found == 0 && errors.Is(err, errFoundNothing):
+		rec.Error = "found nothing"
+	case err != nil:
+		said := err.Error()
+		var ue *url.Error // its URL holds the query of an API asked by GET
+		if errors.As(err, &ue) {
+			said = ue.Op + " " + provider.HostOf(ue.URL) + ": " + ue.Err.Error()
+		}
+		if q := strings.TrimSpace(query); q != "" {
+			for _, form := range []string{q, url.QueryEscape(q), url.PathEscape(q)} {
+				said = strings.ReplaceAll(said, form, "…")
+			}
+		}
+		rec.Error = keepMsg(said)
+		var r searchRefused
+		if errors.As(err, &r) {
+			rec.Status = r.status
+		}
+	case found == 0:
+		rec.Error = "found nothing"
+	default:
+		rec.Status = http.StatusOK
+	}
+	s.keepSearch(ctx, &rec, start)
+	budget.Append(rec)
 }
 
 // searchRefused is a search API's refusal of the key it was asked with,
@@ -202,10 +269,15 @@ func pagesSaid(pages []foundPage) (string, []Hit) {
 
 // askSearchAPI asks one search API for the query.
 func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" {
+		return s.askPluginSearch(ctx, a, v, query)
+	}
 	var r *http.Request
 	var err error
+	var sent []byte
 	post := func(path string, body any) {
 		b, _ := json.Marshal(body)
+		sent = b
 		if r, err = http.NewRequestWithContext(ctx, http.MethodPost, a.Base()+path, bytes.NewReader(b)); err == nil {
 			r.Header.Set("Content-Type", "application/json")
 		}
@@ -229,6 +301,19 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 		// (api-docs.deepseek.com/guides/search); its page text is its
 		// summary, so need_content is left false
 		post("/v1/tools/search", map[string]any{"query": firstRunes(query, deepseekQueryMax), "count": searchHits})
+	case "volcengine":
+		// Doubao Search Custom (volcengine.com/docs/87772/2272953): a
+		// query of 1 to 100 characters, web pages only, and only those
+		// with a URL (NeedUrl leaves out its 火山如意 cards, which have none)
+		post("/search_api/web_search", map[string]any{"Query": firstRunes(query, volcQueryMax), "SearchType": "web",
+			"Count": searchHits, "Filter": map[string]any{"NeedUrl": true}})
+	case "wsa":
+		// Tencent Cloud's Yuanbao Search by its service API key
+		// (cloud.tencent.com/document/product/1806/130615): Cnt is one of
+		// 10/20/30/40/50 (cloud.tencent.com/document/api/1806/121811), and
+		// a smaller one is turned away, so the fewest, cut to searchHits
+		// below
+		post("/SearchPro", map[string]any{"Query": query, "Cnt": wsaCnt})
 	case "searxng":
 		get("/search", url.Values{"q": {query}, "format": {"json"}})
 	case "you":
@@ -279,6 +364,7 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 		return nil
 	}
 	res, err := c.Do(r)
+	res = tapSearch(ctx, r, sent, res)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, errors.New("no answer in time")
@@ -290,8 +376,22 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 	if res.StatusCode >= 300 && res.StatusCode < 400 && res.Header.Get("Location") != "" {
 		return nil, fmt.Errorf("%s: it sends the search on to %s, which isn't given its key; set that address instead", res.Status, res.Header.Get("Location"))
 	}
-	if res.StatusCode >= 300 {
+	status := res.StatusCode
+	var volcMsg string
+	switch a.Vendor {
+	case "volcengine":
+		// its error is in ResponseMetadata.Error, a code beside the
+		// status, and may come with a 200
+		status, volcMsg = volcSearchError(b, status)
+	case "wsa":
+		// Tencent Cloud's is in Response.Error, its HTTP status 200
+		status, volcMsg = wsaSearchError(b, status)
+	}
+	if status >= 300 {
 		msg := provider.APIError(b, res.Status)
+		if volcMsg != "" {
+			msg = volcMsg
+		}
 		if a.Vendor == "you" {
 			// You.com's error is a code ("payment_required"), its message
 			// beside it the words
@@ -305,8 +405,8 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 		if a.Key != "" {
 			msg = strings.ReplaceAll(msg, a.Key, provider.MaskSearchKey(a.Key))
 		}
-		if keyRefusal(res.StatusCode) {
-			return nil, searchRefused{res.StatusCode, msg, res.Header.Get("Retry-After")}
+		if keyRefusal(status) {
+			return nil, searchRefused{status, msg, res.Header.Get("Retry-After")}
 		}
 		return nil, errors.New(msg)
 	}
@@ -320,10 +420,70 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 	return pages, nil
 }
 
+// runPluginSearch asks a plugin's search API in the host (a test's has no host).
+var runPluginSearch = plugin.RunSearch
+
+// askPluginSearch asks a search API a plugin gives (its search hook) in the
+// plugin host. It is asked as a built-in is: from askSearchAPIKeys, so with
+// the user's keys in their order, the same time to answer, the same rest of
+// a key it refused (the plugin throws an error with a status) and the same
+// row in the request log; and with the query apiSearch masked. What it
+// found is cut and cleaned as a built-in's pages are.
+func (s *Server) askPluginSearch(ctx context.Context, a provider.SearchAPI, v provider.SearchVendor, query string) ([]foundPage, error) {
+	got, err := runPluginSearch(ctx, v.Plugin, v.PluginID, query, searchHits, a.Key, a.Base())
+	notePluginSearch(ctx, v.Plugin, pluginSearchAsked(v, query, a.Base(), a.Key, ""), got, err)
+	if err != nil {
+		var r plugin.SearchRefused
+		if errors.As(err, &r) {
+			msg := r.Msg
+			if a.Key != "" {
+				msg = strings.ReplaceAll(msg, a.Key, provider.MaskSearchKey(a.Key))
+			}
+			if keyRefusal(r.Status) {
+				return nil, searchRefused{r.Status, msg, r.RetryAfter}
+			}
+			return nil, errors.New(msg)
+		}
+		if ctx.Err() != nil {
+			return nil, errors.New("no answer in time")
+		}
+		if a.Key != "" {
+			err = errors.New(strings.ReplaceAll(err.Error(), a.Key, provider.MaskSearchKey(a.Key)))
+		}
+		return nil, err
+	}
+	return pluginPages(got), nil
+}
+
+// pluginPages are the pages a plugin's search found, cut and cleaned as a
+// built-in's are.
+func pluginPages(got []plugin.SearchPage) []foundPage {
+	var pages []foundPage
+	for _, r := range got {
+		if r.URL == "" {
+			continue
+		}
+		title := searchPlain(r.Title)
+		if title == "" {
+			title = r.URL
+		}
+		pages = append(pages, foundPage{Title: title, URL: r.URL, Text: clipText(searchPlain(r.Text), pageText), Age: r.Age})
+		if len(pages) == searchHits {
+			break
+		}
+	}
+	return pages
+}
+
 // readSearchAPI reads the pages out of a search API's reply.
 func readSearchAPI(vendor string, b []byte) ([]foundPage, error) {
-	if vendor == "you" {
+	switch vendor {
+	case "you":
 		return readYouSearch(b)
+	case "volcengine":
+		return readVolcSearch(b)
+	case "wsa":
+		return readWSASearch(b)
 	}
 	type result struct {
 		Title       string `json:"title"`
@@ -383,6 +543,170 @@ func readSearchAPI(vendor string, b []byte) ([]foundPage, error) {
 // deepseekQueryMax is the most characters DeepSeek's Search API takes in a
 // query; a longer one is turned away with 400.
 const deepseekQueryMax = 128
+
+// volcQueryMax is the most characters Doubao Search takes in a query.
+const volcQueryMax = 100
+
+// volcSearchError is the status a Doubao Search reply stands for, and its
+// error's words: its ResponseMetadata.Error, read by its code, as a key
+// turned away (403), out of credit (402) or rate limited (429), or as
+// the status it came with; a reply with no error is its own status.
+func volcSearchError(b []byte, status int) (int, string) {
+	var out struct {
+		ResponseMetadata struct {
+			Error *struct {
+				CodeN   int
+				Code    string
+				Message string
+			}
+		}
+	}
+	if json.Unmarshal(b, &out) != nil || out.ResponseMetadata.Error == nil {
+		return status, ""
+	}
+	e := out.ResponseMetadata.Error
+	code := e.CodeN
+	if code == 0 {
+		code, _ = strconv.Atoi(e.Code)
+	}
+	msg := strings.TrimSpace(fmt.Sprintf("%d %s", code, e.Message))
+	switch code {
+	case 10401, 10403, 10409:
+		// a key it doesn't know, a service not opened for it, a plan's
+		// key that can't search the web this way
+		return 403, msg
+	case 10406, 10408, 10410, 10412:
+		// the free searches spent and none paid for, no plan, a plan
+		// spent
+		return 402, msg
+	case 700429:
+		return 429, msg
+	}
+	if status < 300 {
+		status = 502
+	}
+	return status, msg
+}
+
+// readVolcSearch reads Doubao Search's reply: its pages under
+// Result.WebResults, each with a Summary (what its docs give a model:
+// the page's text about the query) and a short Snippet.
+func readVolcSearch(b []byte) ([]foundPage, error) {
+	type hit struct {
+		Title, Url, Summary, Snippet, PublishTime string
+	}
+	var out struct {
+		Result *struct {
+			WebResults []hit
+		}
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	if out.Result == nil {
+		return nil, errors.New("no Result in it")
+	}
+	var pages []foundPage
+	for _, h := range out.Result.WebResults {
+		if h.Url == "" {
+			continue
+		}
+		text := h.Summary
+		if strings.TrimSpace(text) == "" {
+			text = h.Snippet
+		}
+		title := searchPlain(h.Title)
+		if title == "" {
+			title = h.Url
+		}
+		age := h.PublishTime
+		if strings.HasPrefix(age, "1970-01-01") {
+			// its time for a page it has none for
+			age = ""
+		}
+		pages = append(pages, foundPage{Title: title, URL: h.Url, Text: clipText(searchPlain(text), pageText), Age: age})
+	}
+	return pages, nil
+}
+
+// wsaCnt is the Cnt Yuanbao Search is asked for: the fewest it takes.
+const wsaCnt = 10
+
+// wsaSearchError is the status a Yuanbao Search (Tencent Cloud) reply
+// stands for, and its error's words. Tencent Cloud answers 200 whenever
+// the request was handled (cloud.tencent.com/document/api/1806/121818),
+// its error in Response.Error {Code, Message}, so the code decides: one
+// about the key or the service not opened for it is a key turned away
+// (403), one about an account in arrears (ResourceUnavailable, "请检查账号
+// 是否欠费") or a spent quota out of credit (402), a frequency limit
+// rate limited (429). Any other code is a plain error.
+func wsaSearchError(b []byte, status int) (int, string) {
+	var out struct {
+		Response struct {
+			Error *struct{ Code, Message string }
+		}
+	}
+	if json.Unmarshal(b, &out) != nil || out.Response.Error == nil || out.Response.Error.Code == "" {
+		return status, ""
+	}
+	e := out.Response.Error
+	msg := strings.TrimSpace(e.Code + " " + e.Message)
+	code, _, _ := strings.Cut(e.Code, ".")
+	switch code {
+	case "AuthFailure", "UnauthorizedOperation", "ResourceNotFound":
+		// a key it doesn't take ("请检查服务密钥 API KEY 是否正确"), or
+		// the service not opened ("用户资源未开通")
+		return 403, msg
+	case "ResourceUnavailable", "LimitExceeded", "ResourceInsufficient":
+		return 402, msg
+	case "RequestLimitExceeded":
+		return 429, msg
+	}
+	if status < 300 {
+		status = 502
+	}
+	return status, msg
+}
+
+// readWSASearch reads Yuanbao Search's reply: Response.Pages, each page
+// a JSON object in a string, with its title, url, date, passage (its
+// standard summary, in every edition) and content (a summary for the
+// query, not in its 极速版).
+func readWSASearch(b []byte) ([]foundPage, error) {
+	var out struct {
+		Response *struct {
+			Pages []string
+		}
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	if out.Response == nil || out.Response.Pages == nil {
+		return nil, errors.New("no Response.Pages in it")
+	}
+	var pages []foundPage
+	for _, s := range out.Response.Pages {
+		var h struct {
+			Title, URL, Date, Passage, Content string
+		}
+		if json.Unmarshal([]byte(s), &h) != nil || h.URL == "" {
+			continue
+		}
+		text := h.Passage
+		if strings.TrimSpace(searchPlain(text)) == "" || searchPlain(text) == searchPlain(h.Title) {
+			// a passage that is only its title says less than its content
+			if c := searchPlain(h.Content); c != "" {
+				text = h.Content
+			}
+		}
+		title := searchPlain(h.Title)
+		if title == "" {
+			title = h.URL
+		}
+		pages = append(pages, foundPage{Title: title, URL: h.URL, Text: clipText(searchPlain(text), pageText), Age: h.Date})
+	}
+	return pages, nil
+}
 
 // firstRunes is s cut to at most n characters, with nothing added.
 func firstRunes(s string, n int) string {

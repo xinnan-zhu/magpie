@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"slices"
 
@@ -21,6 +22,19 @@ import (
 // magpie's to read.
 func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
 	withGatewaySession(w, r)
+	// the agent's own turn, which the user's model for requests masking
+	// would change is for (maskRouteFor)
+	r = agentTurn(r)
+	// a Responses request naming the response it follows is given the
+	// conversation whole before anything reads it (prev_response.go)
+	w, r, body, kept := previousResponse(w, r, from, body)
+	defer kept()
+	if id := keptTurnLost(r); id != "" {
+		// another magpie's delta after a turn this one doesn't hold:
+		// it sends the conversation whole (remote_delta.go)
+		writePrevNotFound(w, id)
+		return
+	}
 	w, recorded := recordConversation(w, r, from, body)
 	defer recorded()
 	// a conversation going round one tool call is answered here, before
@@ -36,11 +50,11 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 		return
 	}
 	info := gwmw.Info{Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r)}
-	var tried []gwmw.Tried
+	var runs mwRuns
 	for _, a := range agents {
 		// the user's middleware runs before a route is begun: a wait
 		// magpie knows of (unrouted.go)
-		waited := noteWait(r.Context())
+		waited := noteWait(r.Context(), "JS middleware")
 		run := a.Begin(info)
 		if run == nil {
 			waited()
@@ -48,7 +62,10 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 		}
 		defer run.End()
 		if t, ok := run.(gwmw.Tried); ok {
-			tried = append(tried, t)
+			runs.tried = append(runs.tried, t)
+		}
+		if t, ok := run.(gwmw.Accounts); ok {
+			runs.accounts = append(runs.accounts, t)
 		}
 		var turned *gwmw.Reject
 		body, turned = run.Request(body)
@@ -61,28 +78,57 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 		w, done = run.Wrap(w)
 		defer done()
 	}
-	if len(tried) > 0 {
-		r = r.WithContext(context.WithValue(r.Context(), triedKey{}, tried))
+	if len(runs.tried) > 0 || len(runs.accounts) > 0 {
+		r = r.WithContext(context.WithValue(r.Context(), triedKey{}, runs))
 	}
 	s.serve(w, r, from, body)
 }
 
 type triedKey struct{}
 
+// mwRuns are the middleware of an agent's request that are asked again on
+// each try: tried change its body (onProvider), accounts may pass its
+// account over (onAccount).
+type mwRuns struct {
+	tried    []gwmw.Tried
+	accounts []gwmw.Accounts
+}
+
 // triedOn is body as it goes to model on p, in the agent's API: what each
 // middleware of the request that is also gwmw.Tried (the JS chain's
 // onProvider) made of it for that provider. Each try starts from the body
 // it is given, so a change for one provider never reaches another's.
 func triedOn(ctx context.Context, p provider.Provider, model string, body []byte) []byte {
-	tried, _ := ctx.Value(triedKey{}).([]gwmw.Tried)
-	if len(tried) == 0 {
+	runs, _ := ctx.Value(triedKey{}).(mwRuns)
+	if len(runs.tried) == 0 {
 		return body
 	}
 	to := gwmw.To{ID: p.ID, Name: p.Name, Account: accountAgent(p), Model: model}
-	for _, t := range tried {
+	for _, t := range runs.tried {
 		body = t.Tried(body, to)
 	}
 	return body
+}
+
+// accountSkipped asks the request's middleware with onAccount whether the
+// account p is may be used for this try of model, before anything of the
+// try is done: by is the middleware that passed it over, "" when none did.
+// A try on a key asks none, and tells them it is no account's.
+func accountSkipped(ctx context.Context, p provider.Provider, model string) (by string) {
+	runs, _ := ctx.Value(triedKey{}).(mwRuns)
+	if len(runs.accounts) == 0 {
+		return ""
+	}
+	a := gwmw.Account{ID: p.ID, Name: p.Name, Model: model}
+	if p.Account != nil {
+		a.Agent, a.User, a.Plan = p.Account.Agent, p.Account.User, p.Account.Plan
+	}
+	for _, t := range runs.accounts {
+		if skip, who := t.Account(a); skip {
+			return who
+		}
+	}
+	return ""
 }
 
 // ownAsk is ctx for a request magpie asks of its own gateway while it
@@ -94,9 +140,11 @@ func triedOn(ctx context.Context, p provider.Provider, model string, body []byte
 // onProvider on one runtime, and the gateway died of "concurrent map read
 // and map write" (#3695). Nor does the hooks' ctx describe them: a
 // description's body is Chat and a search's Anthropic, whatever
-// ctx.protocol names, and ctx.model and ctx.stream are the agent's.
+// ctx.protocol names, and ctx.model and ctx.stream are the agent's. Nor
+// is it the agent's turn, which a model set for requests masking would
+// change takes (maskRouteFor): it is masked as magpie's own asks are.
 func ownAsk(ctx context.Context) context.Context {
-	return context.WithValue(ctx, triedKey{}, []gwmw.Tried(nil))
+	return context.WithValue(context.WithValue(ctx, triedKey{}, mwRuns{}), agentTurnKey{}, false)
 }
 
 // middlewareWanted: plugins.json has a JS middleware on, so plugins/middleware
@@ -119,7 +167,7 @@ func gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol
 	}
 	// the plugin host, started for it if need be: a wait magpie knows of
 	// before a route is begun (unrouted.go)
-	waited := noteWait(r.Context())
+	waited := noteWait(r.Context(), "plugin hooks")
 	run := plugin.GatewayBegin(r.Context(), body, info)
 	waited()
 	if run == nil {
@@ -147,12 +195,53 @@ func gatewayQuery(req *Request) string {
 // gatewayOrigin exposes provenance, never credentials or peer addresses.
 // Forwarded traffic remains remote even when the administrator trusts its
 // proxy for authentication: that trust does not establish conversation ownership.
+//
+// The sharing key magpie made itself is "magpie-key" only when it comes
+// from this computer (ownComputer): that is where magpie writes it into
+// the owner's own agents. The same key is listed under Gateway keys with
+// a Copy button and offered to connect other computers, so it can be in a
+// friend's hands too, and from anywhere else it stays "gateway-key", as
+// every other gateway key does — one the owner made for someone else, a
+// value a user brought, or one that didn't authenticate. A plugin can then
+// serve the owner's own agents without serving a friend's key
+// (plugins#526). Plugins that trust only "local" see both as not local.
 func gatewayOrigin(r *http.Request) string {
-	if access.Caller(r.Context()).KeyID != "" || managedKey(r) {
+	if who := access.Caller(r.Context()); who.KeyID != "" && who.Default && ownComputer(r) {
+		return "magpie-key"
+	} else if who.KeyID != "" || managedKey(r) {
 		return "gateway-key"
 	}
-	if local(r) && !slices.ContainsFunc(forwardHeaders, func(h string) bool { return r.Header.Get(h) != "" }) {
+	if local(r) && !forwarded(r) {
 		return "local"
 	}
 	return "remote"
+}
+
+func forwarded(r *http.Request) bool {
+	return slices.ContainsFunc(forwardHeaders, func(h string) bool { return r.Header.Get(h) != "" })
+}
+
+// ownComputer: r's connection was made on this computer, where magpie
+// writes the sharing key into agents (agent.keyAt): loopback (a WSL
+// distro on the WSL network is mapped to it by lanGuard), one of this
+// computer's own addresses (an agent calling MAGPIE_ADDR beyond loopback),
+// or a WSL distro's address under NAT calling this computer's network
+// address. Never a request with forwarding headers, a trusted proxy's
+// included, nor one through magpie web's page port.
+func ownComputer(r *http.Request) bool {
+	if forwarded(r) || viaPagePort(r) {
+		return false
+	}
+	if local(r) {
+		return true
+	}
+	a, ok := peerAddr(r)
+	if !ok {
+		return false
+	}
+	if ownAddr(a) {
+		return true
+	}
+	ip := net.IP(a.AsSlice())
+	return slices.ContainsFunc(WSLNets(), func(n *net.IPNet) bool { return n.Contains(ip) })
 }

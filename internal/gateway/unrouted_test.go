@@ -1,16 +1,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/settings"
@@ -57,12 +58,31 @@ func watchedHold(t *testing.T, s *Server) *unroutedHold {
 		}
 		s.active.mu.Unlock()
 		if u != nil {
+			// a hold magpie answered writes its report after the answer,
+			// from its timer: the test's temp HOME stays until it has
+			t.Cleanup(func() { holdReported(t, u) })
 			return u
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("no request was held before routing")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// holdReported waits for u's report when magpie answered it.
+func holdReported(t *testing.T, u *unroutedHold) {
+	t.Helper()
+	u.f.mu.Lock()
+	ended := u.ended
+	u.f.mu.Unlock()
+	if !ended {
+		return
+	}
+	select {
+	case <-u.saved:
+	case <-time.After(30 * time.Second):
+		t.Error("a held request's report was never written")
 	}
 }
 
@@ -141,6 +161,28 @@ func TestUnroutedUnknownHoldAnsweredSooner(t *testing.T) {
 	unlock()
 	if r.err != nil || r.code != http.StatusGatewayTimeout || !strings.Contains(r.body, "without routing it to any provider") {
 		t.Fatalf("held request answered %d %q %v", r.code, r.body, r.err)
+	}
+	heldSaved(t, s)
+}
+
+// heldSaved waits for the report of the request s answered 504 for
+// being held before routing: the 504 goes first and the report is saved
+// after it, so a test that returns on the 504 alone has its HOME removed
+// under the write ("TempDir RemoveAll cleanup: … magpie/held: directory
+// not empty" on mote, 10-29).
+func heldSaved(t *testing.T, s *Server) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		// any route: once let go, the request may have begun one of
+		// its own beside the one shown while it was held
+		for _, r := range routesOf(s, "probe/text") {
+			if r.Held != "" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the held request's report was never saved: %+v", routesOf(s, "probe/text"))
+		}
 	}
 }
 
@@ -281,19 +323,12 @@ func TestUnroutedSlotWaitNotCutOff(t *testing.T) {
 // returned, closed to let it go with text.
 func heldSight(t *testing.T, s *Server) (release func(text string)) {
 	t.Helper()
-	model, ok := seer()
-	if !ok {
+	if _, ok := seer(); !ok {
 		t.Fatal("no model to describe images with")
 	}
-	sum := sha256.Sum256([]byte(model + "\x00" + visionEffort(model) + "\x00" + "data:image/png;base64,aGVsbG8="))
-	key := hex.EncodeToString(sum[:])
 	e := &sight{done: make(chan struct{})}
 	s.sightMu.Lock()
-	if s.sights == nil {
-		s.sights = map[string]*sight{}
-	}
-	s.sights[key] = e
-	s.sightOrder = append(s.sightOrder, key)
+	s.keepSightLocked(sightKey("data:image/png;base64,aGVsbG8="), e)
 	s.sightMu.Unlock()
 	closed := false
 	t.Cleanup(func() {
@@ -375,6 +410,7 @@ func TestUnroutedRequestShownThenAnswered(t *testing.T) {
 	if len(rs) != 1 || !rs[0].Done || rs[0].Status != http.StatusGatewayTimeout || !strings.Contains(rs[0].Error, "without routing") {
 		t.Fatalf("the held request's route: %+v", rs)
 	}
+	heldSaved(t, s)
 }
 
 // One shown while it waited gives way to its own route once routed: the
@@ -466,6 +502,7 @@ func TestUnroutedMostLeavesOutMasking(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("a request held after masking was never answered")
 	}
+	heldSaved(t, s)
 }
 
 // A request another magpie passed on is shown, while it waits to be
@@ -581,4 +618,31 @@ func TestUnroutedCodexPathShowsItsModel(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("never answered once masked")
 	}
+}
+
+// TestUnroutedTimersLetGoOfRequest: a stopped timer is not gone. The
+// runtime keeps it, and its func, in the timer heap of the P that set it
+// until its time comes or that P tidies its heap, so a timer that reached
+// the request kept its body up to unroutedMost after the handler returned
+// (#5250). The test holds the stopped timers as that heap does.
+func TestUnroutedTimersLetGoOfRequest(t *testing.T) {
+	body := make([]byte, 64<<10)
+	gone := weak.Make(&body[0])
+	f := &inflight{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	body = nil
+	_, r, unwatch := (&Server{}).watchUnrouted(httptest.NewRecorder(), r, f)
+	f.mu.Lock()
+	u := f.unrouted
+	f.mu.Unlock()
+	u.wmu.Lock()
+	timers := []*time.Timer{u.unknown, u.most}
+	u.wmu.Unlock()
+	unwatch()
+	u, r, f = nil, nil, nil
+	runtime.GC()
+	if gone.Value() != nil {
+		t.Fatal("a stopped unrouted timer still reaches its request's body")
+	}
+	runtime.KeepAlive(timers)
 }

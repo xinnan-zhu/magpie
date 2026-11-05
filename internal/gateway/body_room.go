@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -65,7 +64,7 @@ const bodyRoomFloor = 64 << 20
 // is not a small one.
 func bodyRoomSize() (int64, string) {
 	limit, why := memLimit(memGOOS, memRoot)
-	if limit <= 0 && memGOOS == runtime.GOOS {
+	if limit <= 0 && memOwn() {
 		limit, why = proc.MemTotal(), "the computer's memory"
 	}
 	if limit <= 0 {
@@ -124,7 +123,7 @@ func (b *bodyRoomT) take(ctx context.Context, n int64) error {
 	}
 	start := time.Now()
 	log.Printf("gateway: a %d MiB request body waits for room: %d MiB of %d MiB held (%s)", n>>20, held>>20, room>>20, why)
-	defer noteWait(ctx)()
+	defer noteWait(ctx, "body room")()
 	timer := time.NewTimer(bodyRoomWait)
 	defer timer.Stop()
 	var err error

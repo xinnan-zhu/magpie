@@ -14,7 +14,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
     for (const lang of ['en','zh','zh-TW','ja','de']) for (const width of [1100,420]) {
       const words = (s) => I18N[lang]?.[s] || s;
       const context = await browser.newContext({viewport:{width,height:820},reducedMotion:'reduce'});
-      const page = await context.newPage(); page.setDefaultTimeout(5000);
+      const page = await context.newPage(); page.setDefaultTimeout(5000); page.setDefaultNavigationTimeout(60000);
       const errors = [], posted = [];
       let configState = 'ready', remoteMode = 'ready', failDeploy = false, failTunnel = true, failPreview = true, failApply = true, failAgent = true, emptyChoices = false, failRefresh = false;
       let pauseHostRefresh = false, releaseHostRefresh;
@@ -149,6 +149,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ['chromium',
       await agent.getByRole('switch').click();
       await view.getByRole('alert').filter({hasText:words('The remote Magpie has no models. Connect the local gateway, copy API providers, or add a provider in the remote Web page first.')}).waitFor();
       assert.equal(await agent.getByRole('switch').getAttribute('aria-checked'),'false');
+      assert.equal(await page.locator('#status').evaluate(s => s.classList.contains('err')),false,'inline errors must leave retry controls usable');
       failAgent = false;
       await agent.getByRole('switch').click();
       await page.waitForFunction(() => document.querySelector('.ssh-agent[data-id="claude"] [role=switch]')?.getAttribute('aria-checked') === 'true');

@@ -85,13 +85,22 @@ type Classified struct {
 	By      string   `json:"by"`               // the classifier model
 	Intents []string `json:"intents"`          // what it chose among
 	Intent  string   `json:"intent,omitempty"` // what it said the message is; "" for none
-	After   string   `json:"after,omitempty"`  // what it said the turn before was, which it was told
-	Effort  string   `json:"effort,omitempty"` // the reasoning it said the turn wants
-	Score   float64  `json:"score,omitempty"`  // how hard it took the turn to be, 0 (low) to 3 (xhigh)
-	Sure    float64  `json:"sure,omitempty"`   // how confident it was of the intent, 0 to 1
-	Cached  bool     `json:"cached,omitempty"` // said before, for the same message
-	Ms      int      `json:"ms,omitempty"`     // how long asking it took
-	Error   string   `json:"error,omitempty"`  // why it couldn't say: no intent matches then, unless Fallback
+	// Said: the answer as it said it — the number a chat model answered
+	// with (0 for none), or the choice a decision model named, its own
+	// "none of these" included — kept when no intent came of it, so
+	// "none" is told from an answer no rule could take (#4598)
+	Said   string  `json:"said,omitempty"`
+	After  string  `json:"after,omitempty"`  // what it said the turn before was, which it was told
+	Effort string  `json:"effort,omitempty"` // the reasoning it said the turn wants
+	Score  float64 `json:"score,omitempty"`  // how hard it took the turn to be, 0 (low) to 3 (xhigh)
+	Sure   float64 `json:"sure,omitempty"`   // how confident it was of the intent, 0 to 1
+	Cached bool    `json:"cached,omitempty"` // said before, for the same message
+	Ms     int     `json:"ms,omitempty"`     // how long asking it took
+	Error  string  `json:"error,omitempty"`  // why it couldn't say: no intent matches then, unless Fallback
+	// Above: the reasoning a group above this one picked for the turn, so
+	// this one's classifier wasn't asked for it (#4358): the turn reasons
+	// at that, not as the agent asked
+	Above string `json:"above,omitempty"`
 	// Fallback: "previous" when it couldn't say and the turn keeps the
 	// intent the turn before had (After), rather than none
 	Fallback string `json:"fallback,omitempty"`
@@ -173,9 +182,13 @@ func firstWords(req *Request) string {
 // the conversation has grown past what that model can take and a rule
 // sends it to one with more room. A group whose decision model picks the
 // effort (provider.EffortAuto) has it pick as the turn begins, when the
-// agent asked for reasoning, and the turn keeps it. It returns nil for a
-// group that decides nothing.
-func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, agent string, ask classifier) *RuleHit {
+// agent asked for reasoning, and the turn keeps it. pick is the reasoning
+// a group above this one already picked for the turn, when there is one:
+// its answer is the one sent (#4358), so this group's classifier is not
+// asked for the effort again — the intents, when its rules have them, are
+// still this group's own routing. It returns nil for a group that decides
+// nothing.
+func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, agent string, ask classifier, pick string) *RuleHit {
 	if !g.Ruled() || req == nil {
 		return nil
 	}
@@ -288,8 +301,19 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	// never be sent (withEffort leaves "none" as it is), only shown (#2247)
 	intents := provider.Intents(g.Rules, q)
 	effort := g.Effort == provider.EffortAuto && hit.Effort != "" && !req.ThinkOff
+	above := ""
+	if effort && pick != "" {
+		// the group above picked this turn's reasoning (#4358): its answer
+		// is the one sent, so asking here again is paid for and thrown
+		// away (a group in it answered 27 of 28 turns on one reporter's
+		// day, several seconds each, and the turn sent the group above's)
+		effort, above = false, pick
+		if len(intents) == 0 {
+			hit.Classified = &Classified{By: g.Classifier, Above: pick}
+		}
+	}
 	if len(intents) > 0 || effort {
-		c := &Classified{By: g.Classifier, Intents: intents}
+		c := &Classified{By: g.Classifier, Intents: intents, Above: above}
 		if had && slices.Contains(intents, tr.intent) {
 			c.After = tr.intent // a message that only carries on is of its kind
 		}
@@ -312,7 +336,8 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 		default:
 			t0 := time.Now()
 			v, cached, err := classify(ask, g.Classifier, intents, prev, effort, text)
-			c.Intent, c.Cached, c.Ms = v.Intent, cached, int(time.Since(t0).Milliseconds())
+			classifiedFor(g.ID, g.Classifier, err)
+			c.Intent, c.Said, c.Cached, c.Ms = v.Intent, v.Said, cached, int(time.Since(t0).Milliseconds())
 			if effort {
 				c.Effort, c.Score = v.Effort, v.Score
 			}
@@ -480,7 +505,7 @@ func keepsEffort(tr turnRule, pick string, tokens int, now time.Time) bool {
 // their own key (at, the group's, and the group's way down), asking ask
 // of the message as the group's own rules do. It gives what each decided
 // and their keys.
-func (s *Server) nestedRules(at string, req *Request, agent string, ask classifier, ms []provider.Member, cands []candidate, pl planned, aff *Affinity) ([]NestedRule, []string, []candidate, planned) {
+func (s *Server) nestedRules(at string, req *Request, agent string, ask classifier, ms []provider.Member, cands []candidate, pl planned, aff *Affinity, picked string) ([]NestedRule, []string, []candidate, planned) {
 	var out []NestedRule
 	var keys []string
 	for depth := 0; ; depth++ { // as deep as the one going first is
@@ -500,9 +525,15 @@ func (s *Server) nestedRules(at string, req *Request, agent string, ask classifi
 				subMs = append(subMs, m.Below(depth+1))
 			}
 		}
-		h := ruleFor(at, sub, subMs, req, agent, ask)
+		// the outermost pick stands (#4358): a group in the group asked
+		// once one above it has picked only pays for an answer the turn
+		// would throw away
+		h := ruleFor(at, sub, subMs, req, agent, ask, picked)
 		keys = append(keys, at)
 		out = append(out, NestedRule{Group: sub.ID, Name: sub.Name, Rule: h})
+		if h != nil && h.Pick != "" && picked == "" {
+			picked = h.Pick
+		}
 		if h == nil || h.Use == "" {
 			continue
 		}
@@ -755,28 +786,49 @@ func ruleOver(hit *RuleHit, ms []provider.Member, cs []candidate, pl planned, af
 	return cs, pl
 }
 
-// ruleEffort is the reasoning a rule asks its member for (#2633), when c
-// is one of that member's keys or accounts — the outermost group's rule
-// that names one, as the turn's pick is the outermost group's — fitted to
-// the levels c's model has. A model whose levels aren't known is asked as
-// it would be without the rule: magpie can't tell it thinks. "" for none.
-// A rule after it that only fails over (Then) asks nothing of its member.
-func ruleEffort(c candidate, hit *RuleHit, nested []NestedRule) string {
+// ruleEffort is the reasoning a rule asks its request for (#2633), fitted
+// to the levels c's model has: that of the outermost group's rule naming
+// one of c's members, as the turn's pick is the outermost group's. A
+// member the group fails over to is asked it too (#3664): the effort is
+// the turn's decision, so a provider that turns the request away doesn't
+// leave the member it went to instead at the agent's own level — and a
+// rule that names c wins over one it only fails over from. A nested
+// group's rule decides for that group's members only, so a member of the
+// outer group outside it isn't asked its effort (ms are the outer
+// group's, each with the groups it is reached through). A model whose
+// levels aren't known is asked as it would be without the rule: magpie
+// can't tell it thinks. "" for none.
+// A rule after it that only fails over (Then) asks nothing of its own:
+// its member is asked the first rule's, as every other member is.
+func ruleEffort(c candidate, hit *RuleHit, nested []NestedRule, ms []provider.Member) string {
 	hits := []*RuleHit{hit}
 	for _, n := range nested {
 		hits = append(hits, n.Rule)
 	}
-	for _, h := range hits {
-		if h == nil || h.UseEffort == "" || !slices.ContainsFunc(h.members, func(m provider.Member) bool { return ofMember(c, m) }) {
+	within := func(group string) bool {
+		return slices.ContainsFunc(ms, func(m provider.Member) bool { return ofMember(c, m) && slices.Contains(m.Groups(), group) })
+	}
+	asked := "" // the effort of the first rule with one, unless one names c
+	for i, h := range hits {
+		if h == nil || h.UseEffort == "" || i > 0 && !within(nested[i-1].Group) {
 			continue
 		}
-		levels := c.p.Efforts(c.model)
-		if len(levels) == 0 {
-			return ""
+		if asked == "" {
+			asked = h.UseEffort
 		}
-		return fitLevel(h.UseEffort, levels)
+		if slices.ContainsFunc(h.members, func(m provider.Member) bool { return ofMember(c, m) }) {
+			asked = h.UseEffort
+			break
+		}
 	}
-	return ""
+	if asked == "" {
+		return ""
+	}
+	levels := c.p.Efforts(c.model)
+	if len(levels) == 0 {
+		return ""
+	}
+	return fitLevel(asked, levels)
 }
 
 // homeCands sends the keys or accounts of the rule's members as the

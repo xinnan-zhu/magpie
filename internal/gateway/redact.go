@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,9 +61,14 @@ func redactedHits(ctx context.Context, w http.ResponseWriter, body []byte) (http
 	if err != nil {
 		return w, body, func() {}, maskHits{}, err
 	}
-	if o.h.n == 0 { // only values sent as written: told, nothing to put back
-		return w, body, func() {}, o.h, nil
+	if o.h.n == 0 { // only values sent as written: told, nothing masked
+		o.b = body
 	}
+	// put back even when this request masked nothing: a conversation
+	// the vendor holds part of (Codex's compaction, sealed in
+	// encrypted_content, a session kept on the vendor's side) has
+	// placeholders a turn of only new, unmasked words doesn't carry, and
+	// the model writes them back in its answer
 	rw, done := m.Writer(w)
 	done = toldBack(rw, done, &o.h)
 	return rw, o.b, done, o.h, nil
@@ -92,12 +100,13 @@ func redactedPrompt(ctx context.Context, w http.ResponseWriter, prompt string) (
 // redactedPromptHits is redactedPrompt with what it swapped.
 func redactedPromptHits(ctx context.Context, w http.ResponseWriter, prompt string) (http.ResponseWriter, string, func(), maskHits, error) {
 	m, masked, h, err := maskTextHits(ctx, prompt)
-	if err != nil {
-		return w, prompt, func() {}, maskHits{}, err
+	if err != nil || m == nil { // masking off: nothing to put back
+		return w, prompt, func() {}, h, err
 	}
 	if h.n == 0 {
-		return w, prompt, func() {}, h, nil
+		masked = prompt
 	}
+	// put back even with nothing masked, as redactedHits does
 	rw, done := m.Writer(w)
 	done = toldBack(rw, done, &h)
 	return rw, masked, done, h, nil
@@ -311,4 +320,105 @@ func unredactedRoute(p provider.Provider, isGroup bool, ms []provider.Member) bo
 		}
 	}
 	return true
+}
+
+// maskedFor is ctx for masking a request resolved to p, or to the group
+// whose models are ms, that may go to the providers unredactedRoute walks:
+// p and each of its fallbacks, or every model of the group. A text sent
+// on that route before goes on it again as it went (masking.WithRoute),
+// so a prefix a vendor cached isn't rewritten by what was found in it
+// since; another route masks it afresh.
+func maskedFor(ctx context.Context, p provider.Provider, isGroup bool, ms []provider.Member) context.Context {
+	var ids []string
+	if !isGroup {
+		ids = append(ids, p.ID)
+		ms = provider.FallbackModels(p)
+	}
+	for _, m := range ms {
+		ids = append(ids, m.Provider.ID)
+	}
+	slices.Sort(ids)
+	return masking.WithRoute(ctx, strings.Join(slices.Compact(ids), "\x00"))
+}
+
+// agentTurnKey marks a request an agent sent (serveAgent, count_tokens,
+// a Codex turn on its own sign-in), the ones the user's route for masked
+// requests is for (maskRouteFor); magpie's own asks made on an agent's
+// context take it off (ownAsk).
+type agentTurnKey struct{}
+
+func agentTurn(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), agentTurnKey{}, true))
+}
+
+func isAgentTurn(r *http.Request) bool {
+	on, _ := r.Context().Value(agentTurnKey{}).(bool)
+	return on
+}
+
+// MaskRoute says id may be the model an agent's request goes to as
+// written when masking would change it (settings.RedactRouteTo): it
+// resolves, is on, holds a conversation, and every place it can go is
+// one the user set to go unmasked (unredactedRoute), its fallbacks and a
+// group's members too, so nothing of it reaches a vendor.
+func MaskRoute(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	if _, off := idOff(id); off {
+		return false
+	}
+	p, model, ok := provider.Resolve(id)
+	if !ok || p.DecidesModel(model) {
+		return false
+	}
+	_, ms, isGroup := provider.FindGroup(id)
+	return unredactedRoute(p, isGroup, ms)
+}
+
+// maskRouteFor is the model the user set for an agent's request that
+// masking changed (h counts a value masked), the request to go there as
+// written instead of masked (jessyoungyu on X); "" leaves it masked: none
+// set, nothing masked (a value only warned of goes as written anyway),
+// magpie's own ask, or a model that can't take it whole now (MaskRoute)
+// or that the calling key may not use. Its failures are its own: what it
+// can go on to is only where the user set requests to go unmasked, and
+// the request is never handed back to be masked and sent to a vendor.
+func maskRouteFor(r *http.Request, h maskHits) string {
+	if h.n == 0 || !isAgentTurn(r) {
+		return ""
+	}
+	to := strings.TrimSpace(settings.Shared().RedactRouteTo)
+	if !MaskRoute(to) {
+		return ""
+	}
+	if who, held := keyHolds(r); held {
+		p, model, _ := provider.Resolve(to)
+		g, ms, isGroup := provider.FindGroup(to)
+		if isGroup && !groupAllowed(who, g, ms) || !isGroup && !modelAllowed(who, p, model) {
+			return ""
+		}
+	}
+	return to
+}
+
+// codexMaskRoute is maskRouteFor for a turn of Codex's on its own ChatGPT
+// sign-in (codexUpstreamOn masks it there): masked here only when a
+// model is set that can take it, so nobody else's turn is masked twice.
+// A turn held back (redact.Block) is left to be held back there.
+func codexMaskRoute(r *http.Request, rest string, body []byte) string {
+	if rest != "/responses" || !MaskRoute(settings.Shared().RedactRouteTo) {
+		return ""
+	}
+	// one the user set to go unmasked goes there as written anyway
+	// (codexUpstreamOn), and stays on it
+	if !apiKey(r.Header) && codexRouteUnmasked(nil) {
+		return ""
+	}
+	_, _, _, hits, err := redactedHits(r.Context(), httptest.NewRecorder(), body)
+	if err != nil {
+		return ""
+	}
+	return maskRouteFor(agentTurn(r), hits)
 }

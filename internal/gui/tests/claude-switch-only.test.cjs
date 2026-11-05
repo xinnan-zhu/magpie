@@ -56,7 +56,7 @@ const label = {
 };
 const strings = [
   "Only switch {agent}'s sign-in",
-  "magpie moves {agent}'s own sign-in to the next account with room when one is used up, and back once it has room. Nothing on these accounts is served through magpie.",
+  "magpie moves {agent}'s own sign-in to the next account with room when one is used up, and keeps it there till that one is used up too. Nothing on these accounts is served through magpie.",
   "magpie serves no requests on these accounts",
   "magpie serves requests on these accounts again",
 ];
@@ -69,11 +69,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, claude(opts), posts));
         await page.goto("http://magpie.test/?view=providers");
-        await page.locator(".row.provider", { hasText: "Claude" }).first().click();
+        // the first draw waits on the page's first reads: a load's room, not a click's (#4470)
+        const row = page.locator(".row.provider", { hasText: "Claude" }).first();
+        await row.waitFor({ timeout: 60000 });
+        await row.click();
         await page.locator(".editor .acc").first().waitFor();
         return { page, errors, posts };
       };

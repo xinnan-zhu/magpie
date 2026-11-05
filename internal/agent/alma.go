@@ -212,10 +212,39 @@ func almaProviders() ([]almaProvider, error) {
 	return ps, err
 }
 
+// almaProvidersSeen is almaProviders as almaLook has them, decoded once
+// per answer: the answer is kept 5s (almaReadFor), and the Agents page's
+// model field, its check and the options each decoded it again, all of
+// Alma's providers with their models, 390MB in 37 minutes of a live
+// magpie. What it gives is shared, only for reading.
 func almaProvidersSeen() ([]almaProvider, error) {
+	if almaAPI == "" {
+		return nil, errAlmaDown
+	}
+	b, err := almaSend("GET", "/api/providers", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	almaSeen.Lock()
+	defer almaSeen.Unlock()
+	if len(b) > 0 && len(b) == len(almaSeen.body) && &b[0] == &almaSeen.body[0] {
+		return almaSeen.ps, nil
+	}
 	var ps []almaProvider
-	err := almaLook("/api/providers", &ps)
-	return ps, err
+	if len(bytes.TrimSpace(b)) > 0 {
+		if err := json.Unmarshal(b, &ps); err != nil {
+			return nil, err
+		}
+	}
+	almaSeen.body, almaSeen.ps = b, ps
+	return ps, nil
+}
+
+// almaSeen is the answer almaProvidersSeen decoded last, by its bytes.
+var almaSeen struct {
+	sync.Mutex
+	body []byte
+	ps   []almaProvider
 }
 
 // almaMagpie is magpie's provider among Alma's: the one named magpie, or
@@ -238,12 +267,19 @@ func almaMagpie(ps []almaProvider) *almaProvider {
 // and each one's name and what magpie knows it can do (almaCaps).
 func almaModels() (ids []string, known []map[string]any) {
 	ids, known = []string{}, []map[string]any{}
-	for _, m := range magpieModels("alma") {
+	for _, m := range sharedModels("alma") {
 		ids = append(ids, m.ID)
 		k := map[string]any{"id": m.ID, "name": m.Name}
-		if caps := almaCaps(m); len(caps) > 0 {
-			k["capabilityOverrides"] = caps
-		}
+		caps := almaCaps(m)
+		// every chat model magpie lists takes tools, as its /v1/models
+		// says (gateway's toolsTold). Alma looks function calling up on
+		// models.dev by the id, finds none for a routing group's name or a
+		// plugin's model, and puts the tools in the prompt instead
+		// (hermesToolMiddleware): no native tools went out, and DeepSeek
+		// answered with its DSML call text, shown raw (ethanchi on
+		// Discord). One the user set in Alma is kept (almaUserFirst).
+		caps["functionCalling"] = true
+		k["capabilityOverrides"] = caps
 		known = append(known, k)
 	}
 	// the model magpie draws with, which Alma offers for its image
@@ -317,10 +353,16 @@ func almaCaps(m catalog.Model) map[string]any {
 	return caps
 }
 
+// almaUserFirst are the overrides whose value a model already has in Alma
+// is kept over magpie's: magpie never wrote them before saying so, so one
+// there is the user's own (Model Options › Tool Calling), and magpie only
+// fills it in where it is missing.
+var almaUserFirst = []string{"functionCalling"}
+
 // almaWithOverrides is known with each model's overrides laid over the ones
 // it has in Alma: the overrides sent take the place of a model's, so one
-// the user set there that magpie says nothing of (functionCalling,
-// pricing) is sent back as it was.
+// the user set there that magpie says nothing of (pricing) is sent back as
+// it was, and one of almaUserFirst stays as the user set it.
 func almaWithOverrides(p *almaProvider, known []map[string]any) []map[string]any {
 	had := map[string]map[string]any{}
 	for _, k := range p.Known {
@@ -345,6 +387,9 @@ func almaWithOverrides(p *almaProvider, known []map[string]any) []map[string]any
 			merged[key] = v
 		}
 		for key, v := range mine {
+			if _, set := o[key]; set && slices.Contains(almaUserFirst, key) {
+				continue
+			}
 			merged[key] = v
 		}
 		kk := map[string]any{}
@@ -370,6 +415,9 @@ func almaSameModels(p *almaProvider, ids []string, known []map[string]any) bool 
 		mine, _ := k["capabilityOverrides"].(map[string]any)
 		had, _ := p.Known[i]["capabilityOverrides"].(map[string]any)
 		for key, v := range mine {
+			if _, set := had[key]; set && slices.Contains(almaUserFirst, key) {
+				continue
+			}
 			if !sameJSONValue(had[key], v) {
 				return false
 			}
@@ -738,7 +786,7 @@ func alma() *Agent {
 			Get: almaGet,
 			Set: almaSet,
 			Options: func(map[string]string) []Option {
-				return append(almaOwn(), viaMagpie("alma", magpieID+"/")...)
+				return withVia(almaOwn(), "alma", magpieID+"/")
 			},
 		}},
 	}

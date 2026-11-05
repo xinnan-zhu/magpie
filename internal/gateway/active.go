@@ -50,6 +50,8 @@ type inflight struct {
 	tr *trace
 	// redaction: its maskings, their phase and time (redact_phase.go)
 	redaction redaction
+	// live: its reply counted as it reaches the agent (live.go)
+	live atomic.Pointer[liveRow]
 }
 
 type inflightKey struct{}
@@ -100,7 +102,12 @@ func notePhase(ctx context.Context, phase string) (restore func()) {
 	}
 	was, _ := f.phase.Load().(string)
 	f.phase.Store(phase)
-	waited := noteWait(ctx)
+	// masking's phase is named by noteMasking's own wait
+	kind := phase
+	if phase == phaseRedact {
+		kind = ""
+	}
+	waited := noteWait(ctx, kind)
 	return func() { waited(); f.phase.Store(was) }
 }
 

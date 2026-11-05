@@ -196,6 +196,7 @@ type responsePick struct {
 // slab were ~775 MB of what 80 s of polls allocated while calls came in
 // (#2278).
 type pickScratch struct {
+	made   int // the gateway's rows of the largest call it served
 	picks  map[string]int32
 	slab   []responsePick
 	picked map[uint64]bool
@@ -210,13 +211,14 @@ func (s *pickScratch) release() {
 	clear(s.slab)
 	s.slab = s.slab[:0]
 	keptPicks.Store(s)
+	lingerScratch()
 }
 
 // codexChunkResponsePairs are the Codex calls the gateway and a session file
 // both name by one response id, gateway to local, and each local call's
 // compaction. Only the ids the gateway names are kept of the locals': a map
 // of every Codex call's id held each decoded chunk's strings.
-func codexChunkResponsePairs(gateways, locals []*rowChunk, duplicateLocal map[rowRef]bool) (map[rowRef]rowRef, map[rowRef]*bool) {
+func codexChunkResponsePairs(gateways, locals []*rowChunk, duplicateLocal refSet) (map[rowRef]rowRef, map[rowRef]*bool) {
 	// the picks are one slice the map points into: a pick each was ~300 MB
 	// of what two minutes of polls allocated while an agent worked (#2278).
 	// The slab holds the gateway's ids, and a gateway call is
@@ -234,10 +236,12 @@ func codexChunkResponsePairs(gateways, locals []*rowChunk, duplicateLocal map[ro
 			}
 		}
 	}
+	need := rowsOfAll(gateways)
 	scratch := keptPicks.Swap(nil)
-	if scratch == nil {
+	if scratch == nil || !scratchFits(scratch.made, need) {
 		scratch = &pickScratch{}
 	}
+	scratch.made = max(scratch.made, need)
 	defer scratch.release()
 	scratch.picks = mapFor(scratch.picks, withID)
 	picks := scratch.picks
@@ -284,7 +288,7 @@ func codexChunkResponsePairs(gateways, locals []*rowChunk, duplicateLocal map[ro
 		open := lent.of(chunk)
 		for i := range open.Rows {
 			ref := rowRef{chunk, i}
-			if duplicateLocal[ref] {
+			if duplicateLocal.has(ref) {
 				continue
 			}
 			k, ok := picks[open.Strings[open.text(&open.Rows[i], rowResponseID)]]
@@ -434,7 +438,7 @@ func chunkIDs(locals []*rowChunk, rows *chunkRows, next bool) map[*rowChunk]*fol
 	return known
 }
 
-func foldCodexRows(locals []*rowChunk) map[rowRef]bool {
+func foldCodexRows(locals []*rowChunk) refSet {
 	// The calls are found by a hash of their response id, not the id: a map
 	// keyed by every Codex call's id held each decoded chunk's strings. Calls
 	// whose hash is the same are told apart by their ids after.
@@ -464,7 +468,7 @@ func foldCodexRows(locals []*rowChunk) map[rowRef]bool {
 		refs = append(refs, hashed...)
 	}
 	read := rowsOf(locals, refs)
-	skip := map[rowRef]bool{}
+	skip := refSet{}
 	for _, hashed := range again {
 		byID := map[string][]rowRef{}
 		var ids []string
@@ -484,7 +488,7 @@ func foldCodexRows(locals []*rowChunk) map[rowRef]bool {
 
 // foldCodexCall keeps the first of refs, the calls a session file names by
 // one response id, and skips the rest when they are the same call.
-func foldCodexCall(refs []rowRef, read map[rowRef]Row, skip map[rowRef]bool) {
+func foldCodexCall(refs []rowRef, read map[rowRef]Row, skip refSet) {
 	if len(refs) < 2 {
 		return
 	}
@@ -517,7 +521,7 @@ func foldCodexCall(refs []rowRef, read map[rowRef]Row, skip map[rowRef]bool) {
 		setCodexActor(refs[0].Chunk, refs[0].Index, "")
 	}
 	for _, ref := range refs[1:] {
-		skip[ref] = true
+		skip.add(ref)
 	}
 	compactions := make([]*bool, len(refs))
 	for i := range refs {
@@ -696,9 +700,9 @@ func codexEffortRows(p Period, now time.Time, reader func(time.Time) []sessions.
 
 // matchingRecords are the gateway's calls from since on that can be matched
 // to one of logs, in the log's order: the ones with a response id, a request
-// id or a session one of them has (an agy call by its agent: agy names no
-// session). Any other gateway call leaves gatewayMatchesDetails' answer for
-// logs as it is.
+// id or a session one of them has (an agy call by its agent, agy's or the
+// app's whose gateway it follows: agy names no session). Any other gateway
+// call leaves gatewayMatchesDetails' answer for logs as it is.
 func matchingRecords(since time.Time, logs []sessions.Call) []Record {
 	responses, requests, sessionIDs := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	agy := false
@@ -714,7 +718,7 @@ func matchingRecords(since time.Time, logs []sessions.Call) []Record {
 	var out []Record
 	Visit(since, func(r Record) {
 		if responses[r.ResponseID] || requests[r.RequestID] || sessionIDs[r.NativeSession] || sessionIDs[r.Session] ||
-			agy && ReportedAs(r.Agent) == "agy" {
+			agy && agyGateway(ReportedAs(r.Agent)) {
 			out = append(out, r)
 		}
 	})
@@ -786,6 +790,29 @@ func (groups effortSums) add(row *Row) {
 	entry.value.CacheWrite1h += row.CacheWrite1h
 	entry.value.Reasoning += row.Reasoning
 	entry.value.Cost += row.Cost
+}
+
+// addValue adds a thread's kept total for one model and effort (effortSplit).
+func (groups effortSums) addValue(actor string, v sessions.ModelEffort) {
+	byModel := groups[actor]
+	if byModel == nil {
+		byModel = map[modelEffortKey]*effortTotal{}
+		groups[actor] = byModel
+	}
+	key := modelEffortKey{v.Model, v.Effort}
+	entry := byModel[key]
+	if entry == nil {
+		entry = &effortTotal{value: sessions.ModelEffort{Model: v.Model, Effort: v.Effort}, priced: true}
+		byModel[key] = entry
+	}
+	entry.priced = entry.priced && v.Priced
+	entry.value.Input += v.Input
+	entry.value.Output += v.Output
+	entry.value.CacheRead += v.CacheRead
+	entry.value.CacheWrite += v.CacheWrite
+	entry.value.CacheWrite1h += v.CacheWrite1h
+	entry.value.Reasoning += v.Reasoning
+	entry.value.Cost += v.Cost
 }
 
 func (groups effortSums) values() map[string][]sessions.ModelEffort {

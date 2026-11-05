@@ -17,10 +17,11 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // accountsCmd: `magpie accounts [agent] [--json]`, `magpie accounts add <agent>`,
-// `magpie accounts switch|forget <agent> <email>`,
+// `magpie accounts switch|forget <agent> <email>`, `magpie accounts switch <claude|codex> next`,
 // `magpie accounts project <gemini|antigravity> <email> <project>`,
 // `magpie accounts alias <agent> <email> [<name>|--clear]`
 // `magpie accounts switch-only <codex|claude> [on|off]`
@@ -30,7 +31,7 @@ func accountsCmd(args []string) error {
 	if len(args) > 1 && args[1] == "discovery" {
 		return accountsDiscoveryCmd(args[2:])
 	}
-	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity|zed|factory|mimo|<plugin>] [--json] | magpie accounts add <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> | magpie accounts add copilot [--host <name>.ghe.com] | magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes] | magpie accounts refresh [--json] | magpie accounts checkin [--json] | magpie accounts switch|forget <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> <email> | magpie accounts switch|forget copilot <login>[@<name>.ghe.com] [--host <name>.ghe.com] | magpie accounts project <gemini|antigravity> <email> <gcp-project-id> | magpie accounts alias <agent|<plugin>> <email> [<name>|--clear] | magpie accounts switch-only <codex|claude> [on|off]"
+	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity|zed|factory|mimo|<plugin>] [--json] | magpie accounts add <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> | magpie accounts add copilot [--host <name>.ghe.com] | magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes] | magpie accounts refresh [--json] | magpie accounts checkin [--json] | magpie accounts switch|forget <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> <email> | magpie accounts switch <claude|codex> next | magpie accounts switch|forget copilot <login>[@<name>.ghe.com] [--host <name>.ghe.com] | magpie accounts project <gemini|antigravity> <email> <gcp-project-id> | magpie accounts alias <agent|<plugin>> <email> [<name>|--clear] | magpie accounts switch-only <codex|claude> [on|off]"
 	agentID := func(s string) (string, error) {
 		switch strings.ToLower(s) {
 		case "claude", "cc":
@@ -189,8 +190,18 @@ func accountsCmd(args []string) error {
 			login, _, _ := strings.Cut(args[3], "@")
 			args[3] = provider.CopilotAccountName(login, h)
 		}
-		if args[3], err = accountNamed(id, args[3]); err != nil {
+		over := false
+		if args[1] == "switch" && strings.EqualFold(args[3], "next") {
+			// the next account in order with room, or the one with the most
+			// room left when every one is past its line
+			if args[3], over, err = provider.NextInOrder(context.Background(), id); err != nil {
+				return err
+			}
+		} else if args[3], err = accountNamed(id, args[3]); err != nil {
 			return err
+		}
+		if over {
+			fmt.Println(muted.Render("every other account is past its line; " + args[3] + " has the most room left"))
 		}
 		if args[1] == "forget" {
 			moved, err := agent.Reseat(func() error { return provider.ForgetLogin(id, args[3]) })
@@ -206,6 +217,12 @@ func accountsCmd(args []string) error {
 		}
 		if _, plug := provider.PluginOf(id); plug || id == "gemini" || id == "antigravity" || id == "copilot" {
 			fmt.Println(green.Render("✓"), "magpie now uses", args[3], "for", id)
+			return nil
+		}
+		if id == "codex" && provider.CodexNoAccount != nil && provider.CodexNoAccount() {
+			// Codex's provider takes no ChatGPT account: nothing running
+			// goes by it, and nothing needs a restart
+			fmt.Println(green.Render("✓"), id, "is now signed in as", args[3], muted.Render("· Codex's provider takes no ChatGPT account, so nothing needs restarting"))
 			return nil
 		}
 		fmt.Println(green.Render("✓"), id, "is now signed in as", args[3], muted.Render("· sessions already running keep their account until restarted"))
@@ -348,7 +365,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 	for _, l := range ls {
 		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}, Lapsed: l.Lapsed}
 		r.Seat = provider.SeatNameOf(l.Agent, l.User)
-		r.Alias = cmp.Or(provider.AccountNameOf(l.Agent, l.User), r.Seat)
+		r.Alias = cmp.Or(provider.AccountLabelOf(l.Agent, l.User), r.Seat)
 		for user, q := range usage[l.Agent] {
 			if !strings.EqualFold(user, l.User) {
 				continue
@@ -435,7 +452,8 @@ func untilShort(d time.Duration) string {
 // addAccount signs in to one more subscription in the browser, the way the
 // window's "Add account" does.
 func addAccount(agentID string) error {
-	if risk := map[string]string{"antigravity": provider.AntigravityRisk, "claude": provider.ClaudeRisk}[agentID]; risk != "" {
+	if risk := map[string]string{"antigravity": provider.AntigravityRisk, "claude": provider.ClaudeRisk,
+		"workbuddy": provider.WorkBuddyRisk, "workbuddy-ai": provider.WorkBuddyRisk}[agentID]; risk != "" {
 		fmt.Println(bold.Render("!"), risk)
 		fmt.Print("Sign in anyway? [y/N] ")
 		var yes string
@@ -470,12 +488,20 @@ func addAccount(agentID string) error {
 			return fmt.Errorf("sign-in didn't finish: %s", st.Error)
 		}
 	}
-	fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
+	linkOnly := settings.Load().SignInLinkOnly
+	if linkOnly {
+		// the user keeps sign-in pages to a browser of their own
+		fmt.Println("Open this link in the browser you sign in with:")
+	} else {
+		fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
+	}
 	fmt.Println(faint.Render(st.URL))
 	if st.Code != "" {
 		fmt.Println("and confirm the code", st.Code)
 	}
-	openInBrowser(st.URL)
+	if !linkOnly {
+		openInBrowser(st.URL)
+	}
 	ctx, stop := interruptContext()
 	defer stop()
 	if st.PasteCallback || st.PasteCode {
@@ -535,7 +561,7 @@ const importUsage = "usage: magpie accounts import <codex|claude|antigravity|fac
 // in accounts from other tools' files, as the window's "Import accounts from
 // a file…" does (#1453): Codex's auth.json, codexbar's config.json, and
 // Cockpit Tools', CLIProxyAPI's and Sub2API's exports for ChatGPT; Claude
-// Code's .credentials.json and
+// Code's .credentials.json, claude-swap's export (cswap --export) and
 // CLIProxyAPI's for Claude; Antigravity Cockpit's, Antigravity Manager's
 // and CLIProxyAPI's for Antigravity (Factory's API keys go to its plugin,
 // with accounts add factory). The files are only
@@ -647,7 +673,11 @@ func importAccounts(args []string) error {
 			fmt.Println(green.Render("✓"), who, muted.Render("· in magpie already, now with this sign-in"))
 		case "exists":
 			took++
-			fmt.Println(muted.Render("="), who, muted.Render("· in magpie already with this sign-in, left as it is"))
+			why := "in magpie already with this sign-in, left as it is"
+			if r.Error != "" {
+				why = r.Error
+			}
+			fmt.Println(muted.Render("="), who, muted.Render("· "+why))
 		default:
 			fmt.Println(bold.Render("✗"), who+":", r.Error)
 		}
@@ -675,9 +705,11 @@ func openURLInBrowser(url string) {
 }
 
 // refreshAccounts: `magpie accounts refresh` renews the sign-in of every
-// saved Claude and ChatGPT account the agent isn't signed in to now — what
-// the gateway does once a day, for a magpie that isn't left running (cron,
-// launchd). A sign-in the vendor refuses is marked as needing a new one.
+// saved ChatGPT account, and every saved Claude account, on or off (Claude
+// Code's /usage run in its own directory), the agent isn't signed in to
+// now — what the gateway does every eight days, for a magpie that isn't
+// left running (cron, launchd). A sign-in the vendor refuses is marked as
+// needing a new one.
 func refreshAccounts(asJSON bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -832,8 +864,9 @@ func checkinWhy(msg string) string {
 }
 
 // accountNamed is the saved account of agent that user names: its name as
-// magpie lists it ("a@b.com · Team"), or the email alone when only one of
-// the agent's accounts has it.
+// magpie lists it ("a@b.com · Team"), the email alone when only one of the
+// agent's accounts has it, or the name the user gave it (alias), when that
+// is one account's and no other's email (provider.AccountByName).
 func accountNamed(agent, user string) (string, error) {
 	user = strings.TrimSpace(user)
 	if agent == "copilot" {
@@ -845,6 +878,13 @@ func accountNamed(agent, user string) (string, error) {
 		}
 	}
 	ls := provider.Logins(agent)
+	users := make([]string, 0, len(ls))
+	for _, l := range ls {
+		users = append(users, l.User)
+	}
+	if u, err := provider.AccountByName(agent, users, user); err != nil || u != "" {
+		return u, err
+	}
 	var names, same []string
 	for _, l := range ls {
 		if strings.EqualFold(l.User, user) {

@@ -63,8 +63,8 @@ func hintsOf(chunks []*rowChunk, rows *chunkRows) []*chunkHints {
 		open := rows.of(c)
 		for j := range open.Rows {
 			p := &open.Rows[j]
-			if p.Time.After(h.latest) {
-				h.latest = p.Time
+			if p.Time().After(h.latest) {
+				h.latest = p.Time()
 			}
 			if id := open.Strings[open.text(p, 11)]; id != "" {
 				h.ids = append(h.ids, uint32(matchHash(id)))
@@ -73,7 +73,7 @@ func hintsOf(chunks []*rowChunk, rows *chunkRows) []*chunkHints {
 				continue
 			}
 			session := open.Strings[open.text(p, 13)]
-			if open.Strings[open.text(p, 0)] == "agy" {
+			if a := open.Strings[open.text(p, 0)]; a == "agy" || session == "" && agyGateway(a) {
 				session = agyMatchSession
 			}
 			if s := matchHash(session); len(h.sessions) == 0 || h.sessions[len(h.sessions)-1] != s {

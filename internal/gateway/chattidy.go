@@ -68,12 +68,36 @@ import (
 // gateway counted the hit, but an agent on pi-ai (DeepSeek Harness), which
 // reads prompt_tokens_details.cached_tokens first, showed none.
 //
+// And a call whose first fragment names no function in a JSON string —
+// no name, null, another kind — is dropped, its later fragments with it,
+// and a finish of tool_calls with no call left ends stop (#1475): a
+// client that checks the shape of every frame refuses the chunk for it
+// and the whole reply with it, the turn not retryable and the call
+// already in the history, so the session is dead — while the gateway's
+// own log says the reply went (AricRedemption). A nameless call runs
+// nowhere, so it is no call, as a written block naming no offered tool
+// is; a name of another kind on a later fragment is left out, the first
+// one's kept.
+//
+// And a legacy function_call that carries nothing — a name and arguments
+// both empty — is left out too (#4659): WorkBuddy's stream ends a reply
+// of plain text on a frame with "function_call":{"name":"","arguments":""}
+// where the contract has null, and a client that checks the shape of
+// every frame reads the empty object for a legacy call and refuses the
+// whole turn, so every text reply a tools-carrying request got was a
+// turn lost (jinccc-ctrl). An empty one runs nowhere, as a nameless call
+// is no call; a null goes as it came, and a call whose name or arguments
+// hold something is one a client may still be reading.
+//
 // Lines pass whole, as they came, unless one has any of them.
 type chatTidy struct {
 	buf     []byte
 	ids     streamCallIDs
 	indexes streamCallIndexes
-	called  map[int]bool // the choices that made a call
+	called  map[int]bool    // the choices that made a call
+	named   map[int]bool    // the choices with a call whose name a client reads
+	seen    map[[2]int]bool // the streamed calls, to know a first fragment
+	bad     map[[2]int]bool // the calls naming no function, with their later fragments
 }
 
 var (
@@ -84,6 +108,7 @@ var (
 	contentParts      = []byte(`"content":[`)
 	contentPartsSpace = []byte(`"content": [`)
 	toolCallsField    = []byte(`"tool_calls"`)
+	functionCallField = []byte(`"function_call":{`)
 )
 
 // write takes what was read and gives back what to send on: every line
@@ -132,7 +157,8 @@ func needsTidy(line []byte) bool {
 		bytes.Contains(line, emptyToolCalls) ||
 		bytes.Contains(line, contentParts) ||
 		bytes.Contains(line, contentPartsSpace) ||
-		bytes.Contains(line, toolCallsField)
+		bytes.Contains(line, toolCallsField) ||
+		bytes.Contains(line, functionCallField)
 }
 
 // needs is needsTidy, a finish_reason once a choice made a call, and a
@@ -265,7 +291,12 @@ func (t *chatTidy) line(line []byte) []byte {
 		if calls, ok := delta["tool_calls"]; ok && string(calls) == "[]" {
 			delete(delta, "tool_calls")
 			inDelta = true
-		} else if ok {
+		}
+		if fc, ok := delta["function_call"]; ok && emptyFunctionCall(fc) {
+			delete(delta, "function_call")
+			inDelta = true
+		}
+		if calls, ok := delta["tool_calls"]; ok {
 			if t.indexes == nil {
 				t.indexes = streamCallIndexes{}
 			}
@@ -273,29 +304,55 @@ func (t *chatTidy) line(line []byte) []byte {
 				calls, delta["tool_calls"] = given, given
 				inDelta = true
 			}
-			if t.ids == nil {
-				t.ids = streamCallIDs{}
-			}
 			if t.called == nil {
 				t.called = map[int]bool{}
 			}
 			t.called[choice] = true
-			if mended, chg := t.ids.mend(choice, calls); chg {
-				calls, delta["tool_calls"] = mended, mended
+			if kept, chg := t.nameless(choice, calls); chg {
+				if kept == nil {
+					delete(delta, "tool_calls")
+					// the fragments went with the drop: none is left for the
+					// id mend to give an id to, or the dropped call would
+					// come back as one with a fresh id and no name (#1475)
+					calls = nil
+				} else {
+					calls, delta["tool_calls"] = kept, kept
+				}
 				inDelta = true
 			}
-			if mended, chg := withoutEmptyNames(calls); chg {
-				delta["tool_calls"] = mended
-				inDelta = true
+			if calls != nil {
+				if t.ids == nil {
+					t.ids = streamCallIDs{}
+				}
+				if mended, chg := t.ids.mend(choice, calls); chg {
+					calls, delta["tool_calls"] = mended, mended
+					inDelta = true
+				}
+				if mended, chg := withoutEmptyNames(calls); chg {
+					delta["tool_calls"] = mended
+					inDelta = true
+				}
 			}
 		}
 		if inDelta {
 			c["delta"], _ = json.Marshal(delta)
 			changed = true
 		}
-		if t.called[choice] && string(bytes.TrimSpace(c["finish_reason"])) == `"stop"` {
-			c["finish_reason"] = json.RawMessage(`"tool_calls"`)
-			changed = true
+		if t.called[choice] {
+			switch end := string(bytes.TrimSpace(c["finish_reason"])); end {
+			case `"stop"`:
+				if t.named[choice] {
+					c["finish_reason"] = json.RawMessage(`"tool_calls"`)
+					changed = true
+				}
+			case `"tool_calls"`:
+				if !t.named[choice] {
+					// the call the finish named named no function: it ends
+					// stop, as a reply that made no call (#1475)
+					c["finish_reason"] = json.RawMessage(`"stop"`)
+					changed = true
+				}
+			}
 		}
 	}
 	if !changed && !usageMended {
@@ -309,6 +366,22 @@ func (t *chatTidy) line(line []byte) []byte {
 		return line
 	}
 	return append(append([]byte("data: "), nb...), end...)
+}
+
+// emptyFunctionCall reports whether raw is a legacy function_call
+// carrying nothing: a name and arguments both empty strings or nulls,
+// either absent (#4659). A null is the contract's own nothing and is not
+// this; a name or arguments of another kind than a string is not read,
+// and the call goes as it came.
+func emptyFunctionCall(raw json.RawMessage) bool {
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return false
+	}
+	var fc struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	return decodeJSON(raw, &fc) == nil && fc.Name == "" && fc.Arguments == ""
 }
 
 // withoutEmptyNames drops the empty "name" on a delta's tool-call
@@ -395,6 +468,83 @@ func (s streamCallIndexes) give(choice int, raw json.RawMessage) (json.RawMessag
 		return raw, false
 	}
 	out, err := json.Marshal(calls)
+	if err != nil {
+		return raw, false
+	}
+	return out, true
+}
+
+// nameless drops the fragments of a streamed call whose first one names
+// no function in a JSON string — no name, null, another kind — with the
+// later fragments of the same call (#1475): a client that checks the
+// shape of every frame refuses the chunk for it and the whole reply with
+// it, the turn not retryable and the call already in the history, so the
+// session is dead. A nameless call runs nowhere, so it is no call, as a
+// written block naming no offered tool is. A name of another kind on a
+// later fragment only loses the field, the first one's kept. It reports
+// the fragments kept, nil when none, and whether any was dropped.
+func (t *chatTidy) nameless(choice int, raw json.RawMessage) (json.RawMessage, bool) {
+	var calls []map[string]json.RawMessage
+	if decodeJSON(raw, &calls) != nil {
+		return raw, false
+	}
+	var kept []map[string]json.RawMessage
+	changed := false
+	for _, call := range calls {
+		idx := 0
+		decodeJSON(call["index"], &idx)
+		key := [2]int{choice, idx}
+		if t.bad[key] {
+			changed = true
+			continue
+		}
+		first := !t.seen[key]
+		if t.seen == nil {
+			t.seen = map[[2]int]bool{}
+		}
+		t.seen[key] = true
+		var fn map[string]json.RawMessage
+		var name json.RawMessage
+		var has bool
+		if decodeJSON(call["function"], &fn) == nil {
+			name, has = fn["name"]
+		}
+		switch {
+		case has && aName(name):
+			if t.named == nil {
+				t.named = map[int]bool{}
+			}
+			t.named[choice] = true
+			kept = append(kept, call)
+		case has && !first:
+			// it would write itself over the name the first fragment
+			// carried, as an empty one would
+			delete(fn, "name")
+			call["function"], _ = json.Marshal(fn)
+			kept = append(kept, call)
+			changed = true
+		default:
+			if !first {
+				// a later fragment: the name went with the first
+				kept = append(kept, call)
+				continue
+			}
+			// no name the client reads, and a call's name goes with its
+			// first fragment: no fragment of this call will name it
+			if t.bad == nil {
+				t.bad = map[[2]int]bool{}
+			}
+			t.bad[key] = true
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false
+	}
+	if kept == nil {
+		return nil, true
+	}
+	out, err := json.Marshal(kept)
 	if err != nil {
 		return raw, false
 	}
@@ -513,6 +663,10 @@ func (t *chatWhole) flush() []byte {
 		mended := parts && flattenContent(msg, true)
 		// a call the upstream gave no id (#2611)
 		mended = wholeCallIDs(msg) || mended
+		// a call naming no function runs nowhere and no client can read
+		// it (#1475)
+		dropped := wholeNameless(msg)
+		mended = dropped || mended
 		if wrote, called := wholeTextCalls(msg, t.names); wrote {
 			if called {
 				c["finish_reason"] = json.RawMessage(`"tool_calls"`)
@@ -523,6 +677,12 @@ func (t *chatWhole) flush() []byte {
 		var native []json.RawMessage
 		if string(bytes.TrimSpace(c["finish_reason"])) == `"stop"` && decodeJSON(msg["tool_calls"], &native) == nil && len(native) > 0 {
 			c["finish_reason"] = json.RawMessage(`"tool_calls"`)
+			changed = true
+		}
+		// the call the finish named naming no function, it ends stop, as a
+		// reply that made no call (#1475)
+		if dropped && string(bytes.TrimSpace(c["finish_reason"])) == `"tool_calls"` && !wholeNamedCall(msg) {
+			c["finish_reason"] = json.RawMessage(`"stop"`)
 			changed = true
 		}
 		if !mended {

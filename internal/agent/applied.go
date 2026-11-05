@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/provider"
@@ -33,6 +34,9 @@ var appliedMu sync.Mutex
 type applied struct {
 	At     time.Time         `json:"at"`
 	Fields map[string]string `json:"fields"` // field key → value
+	// Kept: the user took the agent's config as it was (Keep) while magpie
+	// had it set up, which still says magpie set it up (setUp)
+	Kept bool `json:"kept,omitempty"`
 }
 
 func appliedPath() string { return filepath.Join(filepath.Dir(provider.Path()), "applied.json") }
@@ -171,14 +175,21 @@ func (a *Agent) Drift() *Drift {
 		return nil
 	}
 	vals := a.Values()
+	opts := fieldOptions{}
 	// the field on one of magpie's models: where drift shows, and what
 	// setting it again sets
 	on, onMagpie := a.Fields[0], false
 	for _, f := range a.Fields {
-		if magpieValue(a, f, vals[f.Key], vals) {
+		if magpieValueIn(a, f, vals[f.Key], vals, opts) {
 			on, onMagpie = f, true
 			break
 		}
+	}
+	// a provider named magpie the user wrote by hand is theirs to keep as
+	// they like: there is nothing magpie set to drift from, and Reapply
+	// would write magpie's over it
+	if onMagpie && a.handWired() {
+		return nil
 	}
 	if a.Check != nil {
 		if d := a.Check(); d != "" {
@@ -203,7 +214,7 @@ func (a *Agent) Drift() *Drift {
 		if now == "" && f.Follows != "" {
 			now = vals[f.Follows]
 		}
-		if !ok || picked || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
+		if !ok || picked || now == want || !magpieValueIn(a, f, want, vals, opts) || magpieValueIn(a, f, now, vals, opts) || sameGroup(want, now) {
 			continue
 		}
 		return &Drift{Kind: "replaced", Field: f.Key, Now: vals[f.Key], Want: want,
@@ -257,11 +268,15 @@ func (a *Agent) theInstalled() bool {
 	if !elsewhere() || a.Path == "" {
 		return false
 	}
-	b, err := edit.Read(a.Path)
+	// the bytes filememo keeps, looked at in place: a copy of the file and
+	// two strings of it for each field's drift was 5 MB a poll of a Codex
+	// config.toml of 1.5 MB, in a magpie beside the installed one (a dev
+	// build)
+	b, err := filememo.Read("bytes", a.Path, func(b []byte) ([]byte, error) { return b, nil })
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(b), hostOf(installedURL())) && !strings.Contains(string(b), hostOf(gateway.URL()))
+	return bytes.Contains(b, []byte(hostOf(installedURL()))) && !bytes.Contains(b, []byte(hostOf(gateway.URL())))
 }
 
 // bypassed: the agent was used — while this gateway was up and after magpie
@@ -282,6 +297,30 @@ func bypassed(used, applied, seen time.Time) bool {
 // its suffix after the model (SplitSuffix) aside; a list of models is the
 // user's own.
 func magpieValue(a *Agent, f Field, v string, vals map[string]string) bool {
+	return magpieValueIn(a, f, v, vals, nil)
+}
+
+// fieldOptions keeps each field's options, by its key, for one look at an
+// agent's values: Drift asks magpieValue up to three times a field, and
+// Claude Code's options (claudeViaMagpie, its own models) were made anew
+// each time, 35 MB of what forty polls with real accounts allocated.
+type fieldOptions map[string][]Option
+
+func (o fieldOptions) of(f Field, vals map[string]string) []Option {
+	if o == nil {
+		return f.Options(vals)
+	}
+	opts, ok := o[f.Key]
+	if !ok {
+		opts = f.Options(vals)
+		o[f.Key] = opts
+	}
+	return opts
+}
+
+// magpieValueIn is magpieValue reading a field's options from opts, made
+// for the same vals; nil reads them anew.
+func magpieValueIn(a *Agent, f Field, v string, vals map[string]string, opts fieldOptions) bool {
 	if v == "" {
 		return false
 	}
@@ -300,7 +339,7 @@ func magpieValue(a *Agent, f Field, v string, vals map[string]string) bool {
 	if f.Options == nil {
 		return false
 	}
-	for _, o := range f.Options(vals) {
+	for _, o := range opts.of(f, vals) {
 		if o.Value == v {
 			return o.Ref != ""
 		}
@@ -397,8 +436,24 @@ func (a *Agent) Reapply() error {
 }
 
 // Keep takes the agent's config as it is now: what magpie set before is
-// forgotten, and no longer said to have been changed.
+// forgotten, and no longer said to have been changed. The agent stays one
+// magpie set up (setUp): an entry with no fields is kept for it, so one
+// whose magpie is spelled as a provider of its own config still reads as
+// connected.
 func (a *Agent) Keep() {
+	appliedMu.Lock()
+	defer appliedMu.Unlock()
+	m := appliedLoad()
+	if _, ok := m[a.ID]; !ok {
+		return
+	}
+	m[a.ID] = applied{Kept: true}
+	appliedSave(m)
+}
+
+// forgetSetUp is Disconnect's Keep: what magpie set is forgotten, and so is
+// that magpie set the agent up at all.
+func (a *Agent) forgetSetUp() {
 	appliedMu.Lock()
 	defer appliedMu.Unlock()
 	m := appliedLoad()
@@ -409,20 +464,58 @@ func (a *Agent) Keep() {
 	appliedSave(m)
 }
 
+// setUp reports whether magpie put the agent on magpie and it hasn't been
+// disconnected since: a Connect, which stashes what the agent was on
+// (connect.was, since 10-03, which a Keep never took away), or a field
+// magpie set to one of its models or to itself (applied.json, which Keep
+// keeps an entry in). A field set in magpie to a model of the agent's own,
+// or its thinking level, doesn't set it up.
+func (a *Agent) setUp() bool {
+	if stashShared()[a.ID+".connect.was"] != "" {
+		return true
+	}
+	rec := appliedOf(a.ID)
+	if rec.Kept {
+		return true
+	}
+	for k, v := range rec.Fields {
+		// magpie/<model> as magpie wrote it, its model since gone from the
+		// catalog too
+		if f := a.Field(k); f != nil && (v == magpieID || prefixed(v) || magpieValue(a, *f, v, rec.Fields)) {
+			return true
+		}
+	}
+	return false
+}
+
+// handWired: magpie is spelled as a provider of the agent's own config
+// (Spelled: Pi's magpie/<model>, OpenCode's provider at the gateway), and
+// magpie never set the agent up. A provider named magpie that the user
+// wrote by hand is theirs (JFunfunfun on X): the agent isn't connected,
+// and magpie neither syncs its list there, renames in it, nor takes it out
+// on Disconnect.
+//
+// An app connected natively (Aside) keeps ownership its own way: its
+// provider is magpie's by the key magpie wrote in it.
+func (a *Agent) handWired() bool { return a.Native == nil && a.Spelled != nil && !a.setUp() }
+
 // Wired reports whether magpie is in the agent's config: a field on one of
 // magpie's models, or on magpie itself (an app whose one setting is magpie
-// as its provider).
+// as its provider). A model on a provider of the agent's own config named
+// magpie counts only where magpie set the agent up (handWired).
 func (a *Agent) Wired() bool {
 	if a.Native != nil {
 		return a.Native.Read().Provider == "connected"
 	}
+	// joined by a provider named magpie in the agent's own config (Hermes's
+	// providers.magpie, VS Code's magpie group), as a model on it is
 	if a.Joined != nil && a.Joined() || a.Beside != nil && a.Beside() {
-		return true
+		return !a.handWired()
 	}
 	vals := a.Values()
 	for _, f := range a.Fields {
 		if v := vals[f.Key]; v == magpieID || magpieValue(a, f, v, vals) || a.Routed != nil && setAsGroup(a.ID, f.Key, v) && a.Routed() {
-			return true
+			return !a.handWired()
 		}
 	}
 	return false
@@ -540,7 +633,7 @@ const disconnectedKey = ".disconnected"
 
 // Disconnected reports whether the user disconnected the agent and hasn't
 // connected it since.
-func (a *Agent) Disconnected() bool { return stashLoad()[a.ID+disconnectedKey] == "1" }
+func (a *Agent) Disconnected() bool { return stashShared()[a.ID+disconnectedKey] == "1" }
 
 // noModelLeft says why there is no model of magpie's to connect the agent
 // to: none added yet (NoModelsError), or every one taken out of its lists
@@ -773,6 +866,15 @@ func (a *Agent) Disconnect() (err error) {
 	var was map[string]string
 	json.Unmarshal([]byte(unstash(a.ID+".connect.was")), &was)
 	after := a.Values()
+	// connected while on a provider named magpie it had by hand: what it
+	// was on then is magpie's route, its thinking level read off it too
+	// (dsh's), not the agent's own to put back
+	for _, f := range a.Fields {
+		if w := was[f.Key]; w == magpieID || magpieValue(a, f, w, was) {
+			was = nil
+			break
+		}
+	}
 	for _, f := range a.Fields {
 		if w := was[f.Key]; w != "" && after[f.Key] == "" && w != magpieID && !magpieValue(a, f, w, was) {
 			if err := f.Set(w); err != nil {
@@ -797,7 +899,7 @@ func (a *Agent) Disconnect() (err error) {
 	}
 	b, _ := json.Marshal(back)
 	stash(map[string]string{a.ID + ".reconnect": string(b)})
-	a.Keep()
+	a.forgetSetUp()
 	return nil
 }
 
@@ -848,10 +950,18 @@ func (a *Agent) reconnect(now map[string]string) (bool, error) {
 	// alone, Codex was beside its sign-in and not joined, so picking one
 	// of its own on the Agents page took it off magpie, every OpenAI model
 	// then said direct, and after a group again they said via magpie
-	// though a pick still went straight to OpenAI (NancyTom18 on X)
+	// though a pick still went straight to OpenAI (NancyTom18 on X). One
+	// that can't join now (a provider of the user's own, magpie API) is
+	// connected as at first unless its model was one of magpie's, which
+	// routes it: its subagents' or memories' model put back alone read as
+	// connected while its own model stayed off magpie (#3868)
 	if a.Join != nil {
-		if _, err := a.Join(); err != nil {
+		ok, err := a.Join()
+		if err != nil {
 			return true, err
+		}
+		if !ok && !slices.Contains(rec.Routed, a.Fields[0].Key) {
+			return false, nil
 		}
 	}
 	// the models on magpie first, as Connect sets them (setting Gemini
@@ -941,15 +1051,21 @@ func wiringOff(name, file string, get func(string) (string, bool), kvs ...string
 		if keyHolds(v, want) || v != "" && reachesMagpie(v, want) {
 			continue
 		}
-		where := name + "'s " + k + " (" + filepath.Base(file) + ")"
-		switch {
-		case v == "":
-			return where + " is gone, so it no longer reaches magpie"
-		case strings.Contains(strings.ToLower(k), "url"):
-			return where + " is " + v + ", not magpie's gateway at " + want
-		default:
-			return where + " was changed, so magpie's gateway won't take its requests"
-		}
+		return whatsOff(name, file, k, v, want)
 	}
 	return ""
+}
+
+// whatsOff is what wiringOff says of k in an agent's config, v where
+// magpie wrote want.
+func whatsOff(name, file, k, v, want string) string {
+	where := name + "'s " + k + " (" + filepath.Base(file) + ")"
+	switch {
+	case v == "":
+		return where + " is gone, so it no longer reaches magpie"
+	case strings.Contains(strings.ToLower(k), "url"):
+		return where + " is " + v + ", not magpie's gateway at " + want
+	default:
+		return where + " was changed, so magpie's gateway won't take its requests"
+	}
 }

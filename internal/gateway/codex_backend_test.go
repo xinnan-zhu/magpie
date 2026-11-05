@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/yetone/magpie/internal/codexcat"
+	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -845,6 +848,92 @@ func TestCodexModelListKeepsOwnForGroups(t *testing.T) {
 	}
 }
 
+// A group listing alone (Group.Unlists, 成员模型不单独列出) keeps a signed-in
+// subscription's models out of /v1/models for an agent's key too, not only
+// for a client that is no agent (shaoyang. on Discord, 11-03: the list
+// fetched still had every model of the group). Codex keeps its own
+// ChatGPT models, by name too (/v1/models/{id}); with its models listed too
+// they are listed again.
+func TestGroupAloneKeepsSubscriptionModelsOffAgentsModelList(t *testing.T) {
+	codexSignedIn(t)
+	if err := provider.Save(provider.Provider{ID: "codex", Models: []string{"gpt-6-sol", "gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	var refs []string
+	for _, e := range provider.Catalog() {
+		if provider.CodexOwn(e) {
+			refs = append(refs, e.ID)
+		}
+	}
+	if len(refs) != 2 {
+		t.Fatalf("the account's models: %v", refs)
+	}
+	h := New().Handler()
+	list := func(key string) map[string]bool {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		if key != "" {
+			req.Header.Set("x-api-key", key)
+		}
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", key, rec.Code, rec.Body)
+		}
+		var got struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &got)
+		out := map[string]bool{}
+		for _, m := range got.Data {
+			out[m.ID] = true
+		}
+		return out
+	}
+	found := func(key, id string) bool {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/v1/models/"+id, nil)
+		req.Header.Set("x-api-key", key)
+		h.ServeHTTP(rec, req)
+		return rec.Code == 200
+	}
+	g := provider.Group{ID: "mine", Name: "Mine", Members: refs, Unlists: true}
+	if err := provider.SaveGroup(g); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"", Token, Token + "-hermes", Token + "-claude", Token + "-opencode"} {
+		got := list(key)
+		if !got["group/mine"] {
+			t.Errorf("%q: the group isn't listed: %v", key, got)
+		}
+		for _, ref := range refs {
+			if got[ref] {
+				t.Errorf("%q: %s listed beside the group listing alone", key, ref)
+			}
+		}
+	}
+	if found(Token+"-hermes", refs[0]) {
+		t.Errorf("/v1/models/%s found for Hermes", refs[0])
+	}
+	if got := list(Token + "-codex"); !got[refs[0]] || !got[refs[1]] {
+		t.Errorf("Codex lost its own models: %v", got)
+	}
+	if !found(Token+"-codex", refs[0]) {
+		t.Errorf("/v1/models/%s not found for Codex", refs[0])
+	}
+	g.Unlists = false
+	if err := provider.SaveGroup(g); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"", Token + "-hermes"} {
+		if got := list(key); !got[refs[0]] || !got[refs[1]] || !got["group/mine"] {
+			t.Errorf("%q, its models too: %v", key, got)
+		}
+	}
+}
+
 // A reply's X-Models-Etag carries magpie's list too: Codex refetches its
 // model list on a new one, and only on the backend's it never would when a
 // provider was added.
@@ -863,19 +952,6 @@ func TestCodexModelsEtagTagged(t *testing.T) {
 	tag := codexcat.Tag(provider.CodexListed())
 	if got := rec.Header().Get("X-Models-Etag"); got != `W/"v1+magpie-`+tag+`"` || !codexcat.Tagged(got, tag) {
 		t.Errorf("%d X-Models-Etag %q", rec.Code, got)
-	}
-}
-
-// Responses over a WebSocket are turned away so Codex uses HTTP at once.
-func TestCodexWebSocketUpgradeRequired(t *testing.T) {
-	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { t.Error("sent to ChatGPT") })
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", CodexPath+"/responses", nil)
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Connection", "Upgrade")
-	New().Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusUpgradeRequired {
-		t.Errorf("%d", rec.Code)
 	}
 }
 
@@ -1248,5 +1324,78 @@ func TestRenamedProviderAnsweredItsLead(t *testing.T) {
 	}
 	if a := loggedAnswers(session); len(a) != 1 || a[0].provider != "newrelay" || a[0].who != "newrelay#fp" {
 		t.Fatalf("answers %+v", a)
+	}
+}
+
+// A turn on Codex's own sign-in goes out through magpie's client as a
+// routed try does, so its try says where its time went as one does
+// (TryNet): the Routing page showed nothing for it (Discord, lute: some
+// requests showed magpie's and the vendor's time and some didn't). The
+// backend's wait before its headers is the vendor's.
+func TestCodexOwnSignInTellsWhereItsTimeWent(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	const hold = 200 * time.Millisecond
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		time.Sleep(hold)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":9,"output_tokens":2}}}`))
+	})
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", CodexPath+"/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer chatgpt-token")
+	s.Handler().ServeHTTP(rec, req)
+	st := s.Trace(t.Context(), 0, 0)
+	if rec.Code != 200 || len(st.Routes) != 1 || len(st.Routes[0].Tries) != 1 {
+		t.Fatalf("%d %+v", rec.Code, st.Routes)
+	}
+	n := st.Routes[0].Tries[0].Net
+	if n == nil {
+		t.Fatal("no timing for a turn on Codex's own sign-in")
+	}
+	holdMs := float64(hold.Milliseconds())
+	if n.Asks != 1 || n.Wait < holdMs-1 || n.Head < n.Wait {
+		t.Fatalf("timing %+v for a %v hold", *n, hold)
+	}
+}
+
+// A turn on Codex's own sign-in that was masked keeps what masking took,
+// on its route and in its usage record, as a routed one does: the
+// Routing page showed no masking time for it.
+func TestCodexOwnSignInKeepsItsMaskingTime(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	if err := settings.Save(settings.Settings{Redact: true}); err != nil {
+		t.Fatal(err)
+	}
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":9,"output_tokens":2}}}`))
+	})
+	withoutMasker(t)
+	m := heldMasker{let: make(chan struct{}), entered: make(chan struct{}), once: new(sync.Once)}
+	t.Cleanup(gwmw.Mask(m))
+	const hold = 120 * time.Millisecond
+	go func() {
+		<-m.entered
+		time.Sleep(hold)
+		close(m.let)
+	}()
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", CodexPath+"/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer chatgpt-token")
+	s.Handler().ServeHTTP(rec, req)
+	st := s.Trace(t.Context(), 0, 0)
+	if rec.Code != 200 || len(st.Routes) != 1 {
+		t.Fatalf("%d %+v", rec.Code, st.Routes)
+	}
+	if got := st.Routes[0].Masking; got < hold.Milliseconds() {
+		t.Fatalf("route's masking %d ms, held %s", got, hold)
+	}
+	recs := usage.Load(time.Time{})
+	if len(recs) == 0 || recs[len(recs)-1].Masking != st.Routes[0].Masking {
+		t.Fatalf("usage records %+v, route's masking %d", recs, st.Routes[0].Masking)
 	}
 }

@@ -84,7 +84,7 @@ func miniMax(home string) *Agent { return miniMaxAt(here(home), MiniMaxDir(home)
 
 // miniMaxIn is MiniMax Code's mcode in a WSL distro (see wsl.go): ~/.minimax,
 // as MINIMAX_DATA_DIR there isn't read.
-func miniMaxIn(at place) *Agent { return miniMaxAt(at, filepath.Join(at.home, ".minimax")) }
+func miniMaxIn(at place) *Agent { return miniMaxAt(at, at.join(".minimax")) }
 
 // miniMaxAt is MiniMax Code with its data folder at dir, reaching the
 // gateway as at does.
@@ -114,6 +114,7 @@ func miniMaxAt(at place, dir string) *Agent {
 		ID: "minimax-code", Name: "MiniMax Code", Icon: "minimax-color", Aliases: []string{"mcode"}, Spelled: prefixed,
 		UA:  []string{mcodeUA, "minimaxcode"},
 		Bin: "mcode", Dir: dir, Path: path,
+		ListOnly: true,
 		Sync: func() error {
 			if _, ok := edit.GetYAMLText(path, mcodeEntry); !ok {
 				return nil
@@ -121,6 +122,18 @@ func miniMaxAt(at place, dir string) *Agent {
 			return writeMiniMaxEntry(path)
 		},
 		Notice: func() string {
+			// MiniMax Code Desktop (on this machine; a distro has none)
+			// runs the same runtime on the same config.yaml, but its window
+			// keeps the model last picked in it and shows that, not
+			// defaultModel, while that model is still listed (3.1.10's
+			// renderer, localStorage "mavis:model-selection"). Its runtime
+			// reads config.yaml at start-up and doesn't watch it, so after a
+			// restart magpie's models are in its menu, and one picked there
+			// once is what it runs (教父 on Discord: Desktop went on with
+			// MiniMax-M3.1-Flash, and Sessions showed nothing).
+			if at.spell == nil && (&Agent{ID: "minimax-code"}).HasApp() {
+				return noticeMinimaxDesktop.String()
+			}
 			if Running(`(^|/)mcode( |$)`) {
 				return noticeMinimax.String()
 			}
@@ -188,7 +201,7 @@ func miniMaxAt(at place, dir string) *Agent {
 				return nil
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(miniMaxOwnOptions(path, cur["model"]), viaMagpie("minimax-code", magpieID+"/")...)
+				return withVia(miniMaxOwnOptions(path, cur["model"]), "minimax-code", magpieID+"/")
 			},
 		}},
 	}, path)
@@ -226,7 +239,7 @@ func writeMiniMaxEntryAt(path, gw string) error {
 	models := &yaml.Node{Kind: yaml.MappingNode}
 	// keys is each model's key, its flat one where it has one
 	keys := map[string]string{}
-	for _, m := range magpieModels("minimax-code") {
+	for _, m := range sharedModels("minimax-code") {
 		key := mcodeKey(flat, m.ID)
 		keys[m.ID] = key
 		mn := yamlGet(old, key)
@@ -461,5 +474,6 @@ func miniMaxIcon(provider, model string) string {
 
 // what minimax says after a change (notice.go)
 var (
-	noticeMinimax = newNotice("MiniMax Code reads its settings at start-up — restart open mcode sessions to use this.")
+	noticeMinimax        = newNotice("MiniMax Code reads its settings at start-up — restart open mcode sessions to use this.")
+	noticeMinimaxDesktop = newNotice("MiniMax Code's desktop app keeps the model last picked in it: restart the app, then pick a magpie model once in its model menu (under magpie). Open mcode sessions need a restart too.")
 )

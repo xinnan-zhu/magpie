@@ -6,9 +6,11 @@ package provider
 // nothing again is left to run out, nothing lost. Spending one starts the
 // windows again, and what they have left then is lost, while the fresh
 // windows are the same whenever it is spent: so it is spent as late as is
-// safe, resetExpiryLead before it runs out (#718: spent three hours
-// early, an account held up for the five hours but freed again in two
-// lost the 68% of its week it could have used before the reset ran out).
+// safe, resetLead before it runs out: half an hour unless the user set
+// another (settings' CodexResetLead). Earlier loses what the windows have
+// left then (#718: spent three hours early, an account held up for the
+// five hours but freed again in two lost the 68% of its week it could
+// have used before the reset ran out).
 // Only when the account is held up now and won't be free again before
 // then is it spent at once: nothing more can be used by waiting, and
 // spending it frees the account. It is the reset that runs out first that
@@ -18,6 +20,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -26,14 +29,25 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+// resetLead is how long before a reset runs out it is spent: the user's
+// CodexResetLead, half an hour by default — as late as is safe, with room
+// for a few looks (resetExpiryClose) missed or failed. A value that can't
+// be read is the default, never none. Both the spend (expiringResetSpent)
+// and routing (Allowance.Restarts) read it here, so they can't drift
+// apart (#717, #718). Shared: routing reads it on every request.
+func resetLead() time.Duration {
+	return settings.Shared().ResetLead()
+}
+
+// resetExpiryNear is how long before a reset runs out its account is
+// looked at every resetExpiryClose, from then until it is spent: the lead
+// and half an hour more, an hour at least, so several looks fall inside
+// the lead however long it is.
+func resetExpiryNear(lead time.Duration) time.Duration {
+	return max(time.Hour, lead+30*time.Minute)
+}
+
 var (
-	// resetExpiryLead is how long before a reset runs out it is spent: as
-	// late as is safe, with room for a few looks (resetExpiryClose) missed
-	// or failed
-	resetExpiryLead = 30 * time.Minute
-	// resetExpiryNear is how long before a reset runs out its account is
-	// looked at every resetExpiryClose, from then until it is spent
-	resetExpiryNear = time.Hour
 	// resetExpiryClose is how often an account is looked at near a reset
 	// running out, after one is spent, and after a failed read or spend
 	// then; and how often the accounts are gone over (each is read only
@@ -48,6 +62,14 @@ var (
 	resetExpiryFar = 6 * time.Hour
 )
 
+// errResetsUntilUnread: the account holds resets, but when they run out
+// couldn't be read
+var errResetsUntilUnread = errors.New("couldn't read when its resets run out")
+
+// expiringResetDetailsWait is how long the background look waits for when
+// the resets run out (withResetDetailsWait)
+var expiringResetDetailsWait = 30 * time.Second
+
 var expiring = expiringResets{next: map[string]time.Time{}, until: map[string]time.Time{}}
 
 type expiringResets struct {
@@ -57,7 +79,7 @@ type expiringResets struct {
 }
 
 // check spends one of user's resets, if its windows have been used, when
-// the soonest of them runs out within resetExpiryLead or the account is
+// the soonest of them runs out within resetLead or the account is
 // held up past then (expiringResetSpent); look reads its windows and
 // resets, spend spends the one that runs out first. Code is "" when none
 // was tried. now is wall-clock time: a Mac asleep doesn't count it on the
@@ -74,6 +96,12 @@ func (e *expiringResets) check(user string, now time.Time, look func() ([]QuotaW
 		return ResetOutcome{}, nil
 	}
 	windows, resets, err := look()
+	if err == nil && resets != nil && resets.Count > 0 && resets.untilUnread {
+		// held, but when they run out wasn't read: unknown, not never —
+		// taken for "none runs out", the account went unread for
+		// resetExpiryFar and a reset running out within it ran out unspent
+		err = errResetsUntilUnread
+	}
 	if err != nil {
 		// tried again by the reset last read, soon when it is near
 		e.next[key] = now.Add(resetExpiryWatch)
@@ -116,10 +144,10 @@ func (e *expiringResets) check(user string, now time.Time, look func() ([]QuotaW
 // nextResetLook is when an account holding a reset that runs out at until
 // is looked at next: every resetExpiryClose within resetExpiryNear of
 // that, every resetExpiryWatch before then but never past its start — so
-// the reset is looked at several times within resetExpiryLead, a look
-// missed or failed there still spends it in time.
+// the reset is looked at several times within resetLead, a look missed
+// or failed there still spends it in time.
 func nextResetLook(until, now time.Time) time.Time {
-	if near := until.Add(-resetExpiryNear); near.After(now) {
+	if near := until.Add(-resetExpiryNear(resetLead())); near.After(now) {
 		return minTime(now.Add(resetExpiryWatch), near)
 	}
 	return now.Add(resetExpiryClose)
@@ -127,7 +155,7 @@ func nextResetLook(until, now time.Time) time.Time {
 
 // expiringResetSpent is when a reset that runs out at until is spent by
 // itself (check, when the account's windows have been used by then):
-// resetExpiryLead before it runs out, or now once that has passed; now
+// resetLead before it runs out, or now once that has passed; now
 // too when the account is stopped (a window that stops it used up) and
 // back, when it is free again (zero: not known), isn't before then — what
 // the windows have left can't be used before the reset is spent anyway,
@@ -138,7 +166,7 @@ func expiringResetSpent(until, now time.Time, stopped bool, back time.Time) time
 	if !until.After(now) {
 		return time.Time{}
 	}
-	at := until.Add(-resetExpiryLead)
+	at := until.Add(-resetLead())
 	if !at.After(now) || stopped && (back.IsZero() || !back.Before(at)) {
 		return now
 	}
@@ -191,6 +219,7 @@ func SpendExpiringCodexResets(ctx context.Context) {
 		if _, expiring := CodexAutoResetWhen(user); !expiring {
 			continue // kept to its week used up (#2078)
 		}
+		ctx := withResetDetailsWait(ctx, expiringResetDetailsWait)
 		var who string
 		out, err := expiring.check(user, time.Now(), func() ([]QuotaWindow, *ResetCredits, error) {
 			var windows []QuotaWindow

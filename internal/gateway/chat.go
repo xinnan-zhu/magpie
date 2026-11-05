@@ -320,7 +320,27 @@ func chatReplaysReasoning(host, model string) bool {
 	return strings.Contains(host, "deepseek") || strings.Contains(strings.ToLower(model), "deepseek") || host == provider.CommandCodePlanID || host == "qoder" || host == "qoder-cn"
 }
 
+// joinTexts joins text parts once, at their joined size: a long turn
+// is many parts, and a Builder grown part by part copied the turn
+// several times over on every request
+func joinTexts(content []map[string]any) string {
+	if len(content) == 1 {
+		return content[0]["text"].(string)
+	}
+	n := 0
+	for _, c := range content {
+		n += len(c["text"].(string))
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for _, c := range content {
+		b.WriteString(c["text"].(string))
+	}
+	return b.String()
+}
+
 func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
+	r = responseInstructions(r)
 	var msgs []map[string]any
 	if r.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": r.System})
@@ -453,11 +473,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 				seen = nil
 			}
 			if plain {
-				var b strings.Builder
-				for _, c := range content {
-					b.WriteString(c["text"].(string))
-				}
-				msgs = append(msgs, map[string]any{"role": "user", "content": b.String()})
+				msgs = append(msgs, map[string]any{"role": "user", "content": joinTexts(content)})
 			} else {
 				msgs = append(msgs, map[string]any{"role": "user", "content": content})
 			}
@@ -525,7 +541,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 		out["service_tier"] = r.Tier
 	}
 	if r.MaxTokens > 0 {
-		if strings.HasSuffix(host, "openai.com") {
+		if provider.OpenAIHost(host) {
 			out["max_completion_tokens"] = r.MaxTokens
 		} else {
 			out["max_tokens"] = r.MaxTokens
@@ -564,6 +580,9 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			fn := map[string]any{"name": t.Name, "description": t.Description}
 			if len(t.Schema) > 0 {
 				fn["parameters"] = t.Schema
+			}
+			if r.strictSaid {
+				fn["strict"] = t.Strict
 			}
 			tools = append(tools, map[string]any{"type": "function", "function": fn})
 		}
@@ -1015,10 +1034,15 @@ type cUsage struct {
 		CachedTokens     int `json:"cached_tokens"`
 		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"magpie_deferred,omitempty"`
+	// MagpieCacheUnknown: a plugin's usage saying its vendor gave no cache
+	// counts, as aUsage's CacheUnknown, so the zero is not a miss: Trae's
+	// token_usage naming no cache field (yetone/magpie#3991, #3979).
+	// It is read, never told: chat() leaves it out.
+	MagpieCacheUnknown bool `json:"magpie_cache_unknown"`
 }
 
 func (u cUsage) usage() Usage {
-	out := Usage{Output: u.CompletionTokens}
+	out := Usage{Output: u.CompletionTokens, cacheUnknown: u.MagpieCacheUnknown}
 	if d := u.PromptTokensDetails; d != nil {
 		out.CacheRead, out.CacheWrite = d.CachedTokens, d.CacheWriteTokens
 	}
@@ -1095,6 +1119,11 @@ type chatDecoder struct {
 	trim bool
 }
 
+// leadSpace is the white space a leading block of thinking may come
+// after: a relay writing Windows line ends puts "\r\n" before its <think>
+// (grok2api_python's grok-3-search: "\r\n<think>…</think>\r\n").
+const leadSpace = " \t\r\n"
+
 // thoughtTags are the tags a leading block of thinking comes between in a
 // Chat reply's text, by its opening tag.
 var thoughtTags = map[string]string{"<thought>": "</thought>", "<think>": "</think>"}
@@ -1104,7 +1133,7 @@ var thoughtTags = map[string]string{"<thought>": "</thought>", "<think>": "</thi
 func (d *chatDecoder) text(s string, emit func(Event)) {
 	if !d.past && !d.thought {
 		d.lead += s
-		lead := strings.TrimLeft(d.lead, " \n")
+		lead := strings.TrimLeft(d.lead, leadSpace)
 		for open := range thoughtTags {
 			if len(lead) < len(open) && strings.HasPrefix(open, lead) {
 				return
@@ -1145,7 +1174,7 @@ func (d *chatDecoder) text(s string, emit func(Event)) {
 		}
 	}
 	if d.trim {
-		if s = strings.TrimLeft(s, "\n"); s != "" {
+		if s = strings.TrimLeft(s, "\r\n"); s != "" {
 			d.trim = false
 		}
 	}
@@ -1218,7 +1247,7 @@ func (m *mdCode) find(s, close string, last bool) (at, hold int) {
 // afterThought is t without a leading <think>…</think> block, a whole
 // reply's thinking where its API leaves it in the text; t when it has none.
 func afterThought(t string) string {
-	rest, ok := strings.CutPrefix(t, "<think>")
+	rest, ok := strings.CutPrefix(strings.TrimLeft(t, leadSpace), "<think>")
 	if !ok {
 		return t
 	}
@@ -1241,7 +1270,7 @@ func (d *chatDecoder) markedThought(s string, emit func(Event)) {
 		return
 	}
 	tagged := d.thought || d.lead != ""
-	if lead := strings.TrimLeft(s, " \n"); !tagged && !d.past {
+	if lead := strings.TrimLeft(s, leadSpace); !tagged && !d.past {
 		tagged = lead == ""
 		for open := range thoughtTags {
 			tagged = tagged || strings.HasPrefix(lead, open) || strings.HasPrefix(open, lead)
@@ -1492,7 +1521,7 @@ func stopFromChat(s string) string {
 		return "length"
 	case "tool_calls", "function_call":
 		return "tool"
-	case "content_filter":
+	case "content_filter", "sensitive": // "sensitive": Zhipu's filter
 		return "filter"
 	}
 	return "stop"

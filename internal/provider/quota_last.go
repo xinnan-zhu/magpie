@@ -42,9 +42,10 @@ func lastQuotasPath() string { return filepath.Join(filepath.Dir(Path()), "quota
 
 // passing is an error that says nothing about the account: the vendor
 // rate limiting, failing or out of reach, or a Claude account's usage not
-// read this time (errClaudeNotAsked, errClaudeSaved). A sign-in gone bad
+// read this time (errClaudeNotAsked, errClaudeSaved), or one a setup-token
+// can't read at all (errClaudeSetupToken). A sign-in gone bad
 // is not one.
-var passing = regexp.MustCompile(`(?i)not read yet|doesn't read a saved account|rate.?limit|too many requests|429|internal server error|bad gateway|service unavailable|gateway timeout|deadline exceeded|timeout|timed out|connection (refused|reset)|no such host|network is unreachable|EOF|asks again|fetch failed|unable to connect|ECONN[A-Z]+|ENOTFOUND|EAI_AGAIN|socket hang up|HTTP 5\d\d`)
+var passing = regexp.MustCompile(`(?i)not read yet|a setup-token can't read|doesn't read a saved account|rate.?limit|too many requests|429|internal server error|bad gateway|service unavailable|gateway timeout|deadline exceeded|timeout|timed out|connection (refused|reset)|no such host|network is unreachable|EOF|asks again|fetch failed|unable to connect|ECONN[A-Z]+|ENOTFOUND|EAI_AGAIN|socket hang up|HTTP 5\d\d`)
 
 // keyTag names a key's card among the last readings, by what it is (a
 // plan's windows, a balance) and a digest of the key, never the key: a
@@ -99,7 +100,7 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 	if q.Provider == "claude" && claudeUsageDenied.MatchString(q.Error) {
 		return q
 	}
-	claudeUnavailable := q.Provider == "claude" && q.Error == errClaudeUsageUnavailable.Error()
+	claudeUnavailable := q.Provider == "claude" && claudeUsageUnknown.MatchString(q.Error)
 	if !claudeUnavailable && !passing.MatchString(q.Error) {
 		return q
 	}
@@ -117,6 +118,21 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 		out.Name, out.Icon = c.m[key].Q.Name, c.m[key].Q.Icon
 	}
 	return out
+}
+
+// hadReading is whether a good reading of provider's account (or key
+// tag) user is kept: the account or key was read with windows or a
+// balance before.
+func hadReading(provider, user string) bool {
+	if provider == "" || user == "" {
+		return false
+	}
+	c := &lastQuotas
+	c.Lock()
+	defer c.Unlock()
+	c.load()
+	_, ok := c.m[provider+"/"+strings.ToLower(user)]
+	return ok
 }
 
 // readDeferred is whether err says no read was made this time (allowances

@@ -4,7 +4,7 @@
 // routing group and agent. Its row has a pill: what runs and waits under
 // it while requests are out (the gateway's lanes, read again every two
 // seconds and written into the pill in place), else its limit; a row with
-// none says so on hover only. A click opens the app's own menu (no native
+// none says so under the account's ⋯ only. A click opens the app's own menu (no native
 // select): the provider's, no limit, a number, or Other… typed in place,
 // each posted to provider/accountconcurrency. The editor has the queue's
 // length and wait under Concurrency, saved with it and refused when not a
@@ -97,13 +97,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posts = [];
       await page.route("**/*", serve(lang, posts, lanes));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).first().click();
-      await page.locator(".editor .accts .acc .alane").first().waitFor();
+      await page.locator(".editor .accts .acc .alane").first().waitFor({ state: "attached" });
       await page.waitForTimeout(300);
       return { page, errors, posts };
     };
@@ -128,6 +129,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       return posts.at(-1);
     };
     const opacity = (l) => l.evaluate((e) => getComputedStyle(e).opacity);
+    // an account's unset settings wait under its ⋯
+    const more = async (page, id) => { await row(page, id).hover(); await row(page, id).locator(".acc-more").click(); };
 
     test(`${engine} ${lang}: a key's limit on requests at once shows what runs and waits, and is set from the app's menu`, async (t) => {
       const lanes = { now: { "relay#k1": { busy: 1, waiting: 2, limit: 1 } }, reads: 0 };
@@ -189,7 +192,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(errors, []);
     });
 
-    test(`${engine} ${lang}: an account's own limit is shown, and one with none only on hover`, async (t) => {
+    test(`${engine} ${lang}: an account's own limit is shown, and one with none only under ⋯`, async (t) => {
       const lanes = { now: {}, reads: 0 };
       const { page, errors, posts } = await open(t, "Codex", lanes);
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.four);
@@ -197,10 +200,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.mouse.move(0, 0);
       await page.waitForTimeout(250);
       assert.equal(await opacity(pill(page, "Spare@Example.com")), "1");
-      assert.equal(await opacity(pill(page, "me@example.com")), "0", "none set: on hover only");
-      await row(page, "me@example.com").hover();
+      assert.equal(await pill(page, "me@example.com").isVisible(), false, "none set: under ⋯ only");
+      await more(page, "me@example.com");
       await page.waitForTimeout(250);
       assert.equal(await opacity(pill(page, "me@example.com")), "1");
+      assert.equal(await pill(page, "me@example.com").isVisible(), true);
       await still(page, "me@example.com", pill(page, "me@example.com"));
       const n = posts.length;
       await item(page, "2").click();
@@ -219,7 +223,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await me.textContent(), w.running);
       await page.mouse.move(0, 0);
       await page.waitForTimeout(250);
-      assert.equal(await opacity(me), "1", "running: shown without a hover");
+      assert.equal(await me.isVisible(), true, "running: shown on its line, ⋯ closed");
+      assert.equal(await me.evaluate((e) => e.parentElement.classList.contains("acc-line")), true);
       // the rest of the row's pill look, no colour of a full lane
       assert.equal(await me.evaluate((e) => e.classList.contains("busy-lane") || e.classList.contains("queued")), false);
       const el = await me.elementHandle();
@@ -228,7 +233,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await me.textContent(), w.none);
       assert.equal(await el.evaluate((e) => e.isConnected), true, "the same pill, rewritten in place");
       await page.waitForTimeout(250);
-      assert.equal(await opacity(me), "0", "idle with no limit: on hover only again");
+      assert.equal(await me.isVisible(), false, "idle with no limit: under ⋯ again");
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.four);
       assert.deepEqual(errors, []);
     });

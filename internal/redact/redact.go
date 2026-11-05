@@ -55,6 +55,11 @@ type Options struct {
 	Kinds map[string]bool
 	// Model, where set, finds more in the texts to mask (model.go)
 	Model Model
+	// Route names where a request masked for a vendor may go (the gateway
+	// sets it: the providers a model, its fallbacks or a routing group's
+	// members are served by). A text sent on it before goes on it again
+	// as it went (sentSpans); on another route it is masked afresh.
+	Route string
 	// MinScore is the score the user has Model's finds need (Settings →
 	// Privacy's slider), which Model's own finds are held to already. A
 	// value only the model found, masked before at a lower score, isn't
@@ -83,7 +88,8 @@ type Options struct {
 	// found are the spans Model found, by text, for one request's texts
 	found map[string][]Found
 	// sent is masking for a vendor (Mask, MaskJSON): a text masked
-	// before has the known values it had then (sentKnownSpans)
+	// before on Route has the model's finds and the known values it had
+	// then (sentSpans)
 	sent bool
 }
 
@@ -130,6 +136,10 @@ type rule struct {
 	back, ahead int
 	// cat is what turns the rule on (Options.covers): "" the secrets
 	cat string
+	// field is a rule that takes a value after a field's name and = or :,
+	// a space allowed between them: a value that is the next field's
+	// assignment is not this one's (fieldMatches)
+	field bool
 	// yours is a rule the user wrote (customRules)
 	yours bool
 	// anyGroup takes the first group that matched, for a pattern with a
@@ -153,6 +163,9 @@ var rules = append([]rule{
 	{kind: "API_KEY", re: regexp.MustCompile(`sk-(?:ant-|proj-|or-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`), markers: []string{"sk-"}, bound: tokenCh, ok: notASlug},
 	// a gateway's or a relay's own: oc_sk_…, or_sk_… (#195)
 	{kind: "API_KEY", re: regexp.MustCompile(`[a-z]{2,4}_sk_[A-Za-z0-9_-]{20,}`), markers: []string{"_sk_"}, bound: tokenCh, ok: secretValue},
+	// Volcano Ark and the relays in front of it issue keys with an ark-
+	// prefix (#2946)
+	{kind: "API_KEY", re: regexp.MustCompile(`ark-[A-Za-z0-9][A-Za-z0-9_-]{15,}`), markers: []string{"ark-"}, bound: tokenCh, ok: secretValue},
 	{kind: "API_KEY", re: regexp.MustCompile(`(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|glpat-[A-Za-z0-9_-]{20,})`), markers: []string{"gh", "github_pat_", "glpat-"}, bound: tokenCh},
 	{kind: "API_KEY", re: regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`), markers: []string{"AIza"}, bound: tokenCh},
 	{kind: "API_KEY", re: regexp.MustCompile(`xox[abposr]-[0-9A-Za-z-]{10,}`), markers: []string{"xox"}, bound: tokenCh},
@@ -163,32 +176,44 @@ var rules = append([]rule{
 	{kind: "TOKEN", re: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), markers: []string{"eyJ"}, bound: tokenCh},
 	// the password of user:password@host, or of :password@host as a Redis
 	// URL has it with no user
-	{kind: "PASSWORD", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s:@/?#"'<>]*:([^\s@/?#"'<>]{3,})@`), markers: []string{"://"}, ok: notAVariable},
+	{kind: "PASSWORD", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s:@/?#"'<>]*:([^\s@/?#"'<>]{3,})@`), markers: []string{"://"}, ok: notAVariable, at: hiddenInURL},
 	// password = …, API_KEY: "…", as .env files and configs have them
 	{kind: "SECRET", re: regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:` + secretNames.pattern() + `)[A-Za-z0-9_.-]*` + quote + `[ \t]*[:=][ \t]*` + quote + `(` + secretCh + `{8,})`),
-		markers: secretNames.markers(), ok: secretValue, at: fieldAt},
+		markers: secretNames.markers(), ok: secretValue, at: fieldAt, field: true},
+	// an env var's name says what it holds in the upper case: a
+	// SERVICE_X_KEY, a DB_PASS (#2946). The names above have a word for the
+	// secret in them; these only end in one, and only in the upper case is
+	// that a secret's name — in the lower case a name that ends in key is
+	// code's: a sort key, a cache key, a public key (notAPlainKey turns the
+	// upper-case ones of those away too).
+	{kind: "SECRET", re: regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])[A-Za-z0-9_.-]*_(?:KEY|PASS)` + quote + `[ \t]*[:=][ \t]*` + quote + `(` + secretCh + `{8,})`),
+		markers: fieldNames{{"key", "key"}, {"pass", "pass"}}.markers(), ok: secretValue, at: namedSecretAt, field: true},
+	// an Authorization or Cookie header's value is a secret whatever it
+	// looks like: an opaque bearer token, a session value (#2946)
+	{kind: "SECRET", re: regexp.MustCompile(`(?im)^[ \t]*(?:authorization|cookie)[ \t]*:[ \t]*(\S[^\r\n]{7,})`),
+		markers: fieldNames{{"authorization", "authorization"}, {"cookie", "cookie"}}.markers(), ok: headerValue},
 	// a field called key and nothing more, as providers.json has one: "key":
 	// "oc_sk_…" (#195). Only a long value of letters and digits both, since
 	// code calls anything a key: a map's "key": "value", sort_key, keyboard.
 	{kind: "SECRET", re: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])` + quote + `key` + quote + `[ \t]*[:=][ \t]*` + quote + `(` + secretCh + `{16,})`),
-		markers: fieldNames{{"key", "key"}}.markers(), ok: secretValue, at: fieldAt},
+		markers: fieldNames{{"key", "key"}}.markers(), ok: secretValue, at: fieldAt, field: true},
 	// a password after its name in Chinese, Japanese or Korean, as people
 	// write one into a message: 密码：786kih, 密碼是 hunter2, パスワード: … .
 	// Unlike password = in a config, nothing in code is called 密码, so
 	// any value of four or more is taken, digits only too (CyberCaius on
 	// Discord); a sentence's closing stop is no part of it.
-	{kind: "PASSWORD", re: cjkNamed(cjkPasswordNames), fold: lowerAll(cjkPasswordNames), back: 64, ahead: 100, ok: notAVariable},
+	{kind: "PASSWORD", re: cjkNamed(cjkPasswordNames), fold: lowerAll(cjkPasswordNames), back: 64, ahead: 100, ok: notAVariable, field: true},
 	// a key, a secret or a token after its name the same way: 密钥为 …,
 	// 令牌是 …, 金鑰： … . A key of digits only is taken after 为, 是, ：
 	// or = when it has six or more and counts nothing, so 密钥为12231241
 	// is masked and 密钥为 2048 位 is left.
-	{kind: "SECRET", re: cjkNamed(cjkKeyNames), fold: lowerAll(cjkKeyNames), back: 64, ahead: 100, at: keyAt},
+	{kind: "SECRET", re: cjkNamed(cjkKeyNames), fold: lowerAll(cjkKeyNames), back: 64, ahead: 100, at: keyAt, field: true},
 	// an English name for one before 为, 為, 是 or ：, as a Chinese message
 	// has it: apikey 为 …, token 是 …, API Key：… (CyberCaius on Discord).
 	// password = … and API_KEY: … in a config are the SECRET rule's above.
 	{kind: "SECRET", re: regexp.MustCompile(`(?i)(?:` + secretNames.pattern() + `|pwd|api[ ]key|access[ ]key|secret[ ]key|key|\bpin(?:[ ]?code)?)` + quote +
 		`[ \t]*(?:[为為是][ \t]*[:：]?|：)[ \t]*(?:\\?["'“「])?(` + secretCh + `{3,}[A-Za-z0-9_\-/+=~!@#%^&*])`),
-		fold: cjkCopulas, back: 24, ahead: 260, at: keyAt},
+		fold: cjkCopulas, back: 24, ahead: 260, at: keyAt, field: true},
 
 	{kind: "EMAIL", re: regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`), markers: []string{"@"}, bound: alnum + "_%+-", ok: realEmail, at: emailAt, cat: catPersonal},
 	{kind: "ID_CARD", re: regexp.MustCompile(`[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]`), bound: alnum, ok: chineseID, cat: catPersonal},
@@ -274,6 +299,12 @@ const (
 
 // placeholderRe is a placeholder as Mask writes it.
 var placeholderRe = regexp.MustCompile(`\{\{[A-Z][A-Z0-9_]*_[a-z2-7]{8}\}\}`)
+
+// HasPlaceholder says whether s holds text written as Mask writes a
+// placeholder, in JSON or not.
+func HasPlaceholder(s string) bool {
+	return strings.Contains(s, "{{") && placeholderRe.MatchString(s)
+}
 
 // notAVariable turns away what stands in for a value: ${PASS}, <password>, ****.
 func notAVariable(v string) bool {
@@ -409,6 +440,46 @@ func inUserinfo(s string, a int) bool {
 	return k < j
 }
 
+// hiddenInURL says the password at s[a:b], in a URL's user:password@,
+// is hidden by masking it: it is not also written as it is elsewhere in
+// the same URL, as its user name, a part of its host or of its path. A
+// test database's URL often gives one word for all three:
+// postgresql://geodatafusion:geodatafusion@127.0.0.1:55432/geodatafusion
+// is the PostGIS test of the geodatafusion repo. Its password was masked
+// while the URL still had it twice as written, and once masked the word
+// was known (knownSpans): the project's folders, its crate, its .toml
+// and cargo test -p geodatafusion went to the vendor as a made-up word
+// for the rest of the run, as a password (xuanwo on X, 10-29: "很多项目名
+// 被识别成了 password", 26M masked in a day). postgres:postgres,
+// root:root and guest:guest are the same: anyone who reads the user
+// reads the password. A password not written elsewhere in its URL is
+// masked as before, whatever it looks like: app:geodatafusion@ masks it
+// there and, as known, wherever it is next.
+func hiddenInURL(s string, a, b int) bool {
+	pw := s[a:b]
+	i := strings.LastIndex(s[:a], "//")
+	if i < 0 || s[a-1] != ':' {
+		return true
+	}
+	if s[i+2:a-1] == pw {
+		return false // the user name
+	}
+	// the host and the path, to the URL's end
+	end := b + 1
+	for end < len(s) && !strings.ContainsRune(" \t\r\n\"'<>`\\)]}", rune(s[end])) {
+		end++
+	}
+	if b+1 > end {
+		return true
+	}
+	for _, part := range strings.FieldsFunc(s[b+1:end], func(r rune) bool { return strings.ContainsRune("/:.?#&=;,@", r) }) {
+		if part == pw {
+			return false
+		}
+	}
+	return true
+}
+
 // realEmail is whether v, matched as an address, is someone's. git@ is
 // the user every git host is reached by over SSH (git@github.com:o/r.git,
 // git@gitee.com, a company's own git@git.corp.com), no one's mailbox, and
@@ -435,6 +506,65 @@ func notASlug(v string) bool {
 		}
 	}
 	return false
+}
+
+// headerValue says the rest of an Authorization or Cookie line is a
+// header's value, not prose that begins with the word ("Authorization:
+// the user must sign in first"): a credential, after a scheme word or
+// alone (Bearer …, Basic …), or a cookie's name=value pairs. One that
+// stands for a variable (${TOKEN}, <token>, ****) is left alone.
+func headerValue(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || !notAVariable(v) {
+		return false
+	}
+	notLetter := func(r rune) bool { return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') }
+	f := strings.Fields(v)
+	if len(f) == 1 || len(f) == 2 && strings.IndexFunc(f[0], notLetter) < 0 {
+		// a word alone is prose's: a credential has a digit or a sign in it
+		cred := f[len(f)-1]
+		return len(cred) >= 8 && notAVariable(cred) && strings.IndexFunc(cred, notLetter) >= 0
+	}
+	for _, kv := range strings.Split(v, ";") {
+		if kv = strings.TrimSpace(kv); kv == "" {
+			continue
+		}
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || name == "" || strings.ContainsAny(name, " \t") {
+			return false
+		}
+	}
+	return strings.Contains(v, "=")
+}
+
+// notAPlainKey turns away the upper-case name before the value at s[:a]
+// when it only ends in key and holds no secret: a sort key, a cache key, a
+// prompt cache key, a public key (#2946).
+func notAPlainKey(s string, a, b int) bool {
+	i := a
+	for i > 0 && strings.IndexByte(`"' `+"\t:=", s[i-1]) >= 0 {
+		i--
+	}
+	end := i
+	for i > 0 && strings.IndexByte(alnum+"_.-", s[i-1]) >= 0 {
+		i--
+	}
+	name := strings.ToLower(s[i:end])
+	return !strings.HasSuffix(name, "sort_key") && !strings.HasSuffix(name, "cache_key") &&
+		!strings.HasSuffix(name, "prompt_cache_key") && !strings.HasSuffix(name, "public_key")
+}
+
+// notPlainKeyOrCode keeps both boundaries on a name that only ends in _KEY
+// or _PASS: plain keys stay as written, and so does code naming a secret.
+func notPlainKeyOrCode(s string, a, b int) bool {
+	return notAPlainKey(s, a, b) && notCode(s, a, b)
+}
+
+// namedSecretAt is notPlainKeyOrCode with the value-side reading the SECRET
+// rules' fieldAt gained later: a const TOKEN_KEY = "access_token_v2" is
+// code naming a token, and its value reads as a version, so both stay.
+func namedSecretAt(s string, a, b int) bool {
+	return notPlainKeyOrCode(s, a, b) && fieldAt(s, a, b)
 }
 
 func realEmail(v string) bool {
@@ -580,15 +710,19 @@ func luhn(v string) bool {
 // ---- placeholders ---------------------------------------------------------------
 
 var (
-	mu      sync.RWMutex
-	values  = map[string]string{} // placeholder → value
-	kinds   = map[string]bool{}   // the kinds of values, for wordTail
+	mu     sync.RWMutex
+	values = map[string]string{} // placeholder → value
+	kinds  = map[string]bool{}   // the kinds of values, for wordTail
+	// used is when each placeholder was last made or met again, by
+	// clock: makeRoom lets the ones used longest ago go first
+	used    = map[string]uint64{}
+	clock   uint64
 	keyOf   []byte
 	keyPath string // guarded by mu, as keyOf is
 )
 
-// maxValues bounds what is held; past it the oldest half is let go, and a
-// request that still has them brings them back.
+// maxValues bounds what is held; past it the half used longest ago is let
+// go, and a request that still has them brings them back.
 const maxValues = 200_000
 
 func key() []byte {
@@ -654,23 +788,35 @@ func placeholder(kind, v string) string {
 		kinds[kind] = true
 		addKnown(p, v)
 	}
+	touch(p)
 	mu.Unlock()
 	return p
 }
 
-// makeRoom lets the oldest half of values go when they are full; called
-// with mu held.
+// touch says p was used now; called with mu held.
+func touch(p string) {
+	clock++
+	used[p] = clock
+}
+
+// makeRoom lets the half of values used longest ago go when they are
+// full; called with mu held. What a request in flight has just masked, or
+// met again, is the newest: let go at random, a value masked a moment
+// before could be gone by the time its placeholder came back, and the
+// answer kept the placeholder.
 func makeRoom() {
 	if len(values) < maxValues {
 		return
 	}
-	n := 0
-	for k := range values {
-		delete(values, k)
-		delete(shapes, k)
-		if n++; n >= maxValues/2 {
-			break
-		}
+	ps := make([]string, 0, len(values))
+	for p := range values {
+		ps = append(ps, p)
+	}
+	sort.Slice(ps, func(i, j int) bool { return used[ps[i]] < used[ps[j]] })
+	for _, p := range ps[:len(ps)/2] {
+		delete(values, p)
+		delete(shapes, p)
+		delete(used, p)
 	}
 	reindexKnown()
 }
@@ -829,7 +975,7 @@ func Mask(s string, o Options) (string, int) {
 
 // Preview is Mask with nothing remembered: each value goes as the
 // placeholder, or with Options.Shape the made-up key, it would have (a
-// user name its made-up name, an IP address its documentation one), which
+// user name its made-up name, an IP address its public-ip- name), which
 // isn't kept for Restore or as a value seen before (known.go).
 func Preview(s string, o Options) string {
 	put := tag
@@ -849,7 +995,7 @@ func Preview(s string, o Options) string {
 		}
 		if kind == "IP" {
 			if at, _, ok := ipStandIns(v); ok {
-				return at(0) // an address's documentation one (shape.go)
+				return at(0) // an address's public-ip- name (shape.go)
 			}
 		}
 		return tagOrShape(kind, v)
@@ -920,80 +1066,18 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 			i = max(b, a+1)
 		}
 	}
-	all := rules
-	if o.Secrets && len(o.Rules) > 0 {
-		// the user's first: where one of theirs and one of magpie's find
-		// the same value, it goes by the name they gave it
-		all = append(customRules(o.Rules), rules...)
-	}
-	lower := ""
-	// split are matches a rule took apart into values of their own
-	// (rkato@box17 as a user and a host): what another rule found from
-	// the same place in them, an email, goes
-	var split []span
-	for _, r := range all {
-		if !o.covers(r.cat) {
-			continue
-		}
-		if len(r.markers) > 0 && !containsAny(s, r.markers) {
-			continue
-		}
-		if len(r.fold) > 0 {
-			if lower == "" {
-				lower = lowerASCII(s)
-			}
-			if !containsAny(lower, r.fold) {
-				continue
-			}
-		}
-		for _, m := range r.matches(s, lower) {
-			if len(r.groups) > 0 {
-				took := false
-				for g, kind := range r.groups {
-					if a, b := m[2*g+2], m[2*g+3]; a >= 0 && r.takes(s, a, b, r.groupOK[g]) {
-						found = append(found, span{a, b, kind, r.by(), 0, false})
-						took = true
-					}
-				}
-				if took {
-					split = append(split, span{m[2], m[1], "", "", 0, false})
-				}
-				continue
-			}
-			a, b := m[0], m[1]
-			for g := 1; 2*g+1 < len(m); g++ {
-				if m[2*g] >= 0 {
-					a, b = m[2*g], m[2*g+1]
-					break
-				}
-				if !r.anyGroup {
-					break
-				}
-			}
-			ok := r.ok
-			if r.fix != nil {
-				var good bool
-				if a, b, good = r.fix(s, a, b); !good {
-					continue
-				}
-				ok = nil
-			}
-			if r.takes(s, a, b, ok) {
-				found = append(found, span{a, b, r.kind, r.by(), 0, false})
-			}
-		}
-	}
-	for _, sp := range split {
-		found = slices.DeleteFunc(found, func(f span) bool {
-			return f.kind == "EMAIL" && f.start == sp.start && f.end <= sp.end
-		})
-	}
+	found = append(found, ruleSpans(s, o)...)
 	// after the rules', so where a rule finds the same value it keeps the
 	// kind it has always had
-	found = append(found, modelSpans(raw, o)...) // the model was asked about raw
 	if o.sent {
-		found = append(found, sentKnownSpans(s, o)...)
+		// the model was asked about raw
+		now := modelSpans(raw, o)
+		kept := sentSpans(sentModel, raw, o, func() []span { return now })
+		learnLate(raw, now, kept, o, escaped)
+		found = append(found, kept...)
+		found = append(found, sentSpans(sentKnown, s, o, func() []span { return knownSpans(s, o) })...)
 	} else {
+		found = append(found, modelSpans(raw, o)...) // the model was asked about raw
 		found = append(found, knownSpans(s, o)...)
 	}
 	if escaped {
@@ -1004,6 +1088,113 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 		noteScores(raw, found) // what is masked for a vendor, not a preview
 	}
 	return apply(raw, found, put, o)
+}
+
+// ruleSpans are what the rules, magpie's and the user's own, find in s,
+// the text the finders read.
+func ruleSpans(s string, o Options) []span {
+	return memoRules(s, o, func() []span {
+		if len(s) >= ruleMemoMin {
+			ruleRuns.Add(1)
+		}
+		var found []span
+		all := rules
+		if o.Secrets && len(o.Rules) > 0 {
+			// the user's first: where one of theirs and one of magpie's find
+			// the same value, it goes by the name they gave it
+			all = append(customRules(o.Rules), rules...)
+		}
+		lower := ""
+		// split are matches a rule took apart into values of their own
+		// (rkato@box17 as a user and a host): what another rule found from
+		// the same place in them, an email, goes
+		var split []span
+		for _, r := range all {
+			if !o.covers(r.cat) {
+				continue
+			}
+			if len(r.markers) > 0 && !containsAny(s, r.markers) {
+				continue
+			}
+			if len(r.fold) > 0 {
+				if lower == "" {
+					lower = lowerASCII(s)
+				}
+				if !containsAny(lower, r.fold) {
+					continue
+				}
+			}
+			for _, m := range r.matches(s, lower) {
+				if len(r.groups) > 0 {
+					took := false
+					for g, kind := range r.groups {
+						if a, b := m[2*g+2], m[2*g+3]; a >= 0 && r.takes(s, a, b, r.groupOK[g]) {
+							found = append(found, span{a, b, kind, r.by(), 0, false})
+							took = true
+						}
+					}
+					if took {
+						split = append(split, span{m[2], m[1], "", "", 0, false})
+					}
+					continue
+				}
+				a, b := m[0], m[1]
+				for g := 1; 2*g+1 < len(m); g++ {
+					if m[2*g] >= 0 {
+						a, b = m[2*g], m[2*g+1]
+						break
+					}
+					if !r.anyGroup {
+						break
+					}
+				}
+				ok := r.ok
+				if r.fix != nil {
+					var good bool
+					if a, b, good = r.fix(s, a, b); !good {
+						continue
+					}
+					ok = nil
+				}
+				if r.takes(s, a, b, ok) {
+					found = append(found, span{a, b, r.kind, r.by(), 0, false})
+				}
+			}
+		}
+		for _, sp := range split {
+			found = slices.DeleteFunc(found, func(f span) bool {
+				return f.kind == "EMAIL" && f.start == sp.start && f.end <= sp.end
+			})
+		}
+		return found
+	})
+}
+
+// learnLate makes known what the model finds in raw now that it didn't
+// the first time raw was sent on o.Route (now, beside kept): raw goes as
+// it went, but a value in it the model has read since is masked in new
+// text, as it would be had raw been masked with it (known.go). Nothing
+// is told (o.Seen): it isn't masked here.
+func learnLate(raw string, now, kept []span, o Options, escaped bool) {
+	var late []span
+	for _, f := range now {
+		if !slices.ContainsFunc(kept, func(k span) bool { return k.start == f.start && k.end == f.end && k.kind == f.kind }) {
+			late = append(late, f)
+		}
+	}
+	if len(late) == 0 {
+		return
+	}
+	if escaped {
+		late = outsideEscapes(raw, late)
+	}
+	noteScores(raw, late)
+	o.Seen = nil
+	put := o.put()
+	if escaped {
+		put = unescapedPut(put)
+	}
+	apply(raw, late, put, o)
 }
 
 // unescapedView is s, JSON text, as long as s and read as the vendor reads
@@ -1262,7 +1453,7 @@ func (r rule) by() string {
 // ahead set, only around its fold markers.
 func (r rule) matches(s, lower string) [][]int {
 	if r.ahead == 0 {
-		return r.re.FindAllStringSubmatchIndex(s, -1)
+		return r.findAll(s)
 	}
 	var wins [][2]int
 	for _, f := range r.fold {
@@ -1301,7 +1492,7 @@ func (r rule) matches(s, lower string) [][]int {
 			k++
 			w[1] = max(w[1], wins[k][1])
 		}
-		for _, m := range r.re.FindAllStringSubmatchIndex(s[w[0]:w[1]], -1) {
+		for _, m := range r.findAll(s[w[0]:w[1]]) {
 			for x := range m {
 				if m[x] >= 0 {
 					m[x] += w[0]
@@ -1313,12 +1504,31 @@ func (r rule) matches(s, lower string) [][]int {
 	return out
 }
 
+// findAll are r's matches in s: each of them, or, for a rule that reads
+// a field's value after its name (field), none whose value is the next
+// field (fieldMatches).
+func (r rule) findAll(s string) [][]int {
+	if r.field {
+		return fieldMatches(r.re, s)
+	}
+	return r.re.FindAllStringSubmatchIndex(s, -1)
+}
+
 // lowerASCII is s with its ASCII letters in lower case, as long as s, so a
-// place in one is the same place in the other.
+// place in one is the same place in the other (a byte of a character
+// outside ASCII is never an ASCII letter). It is s itself, not a copy,
+// where s has no capital.
 func lowerASCII(s string) string {
+	i := 0
+	for i < len(s) && !('A' <= s[i] && s[i] <= 'Z') {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
 	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
+	for ; i < len(b); i++ {
+		if c := b[i]; 'A' <= c && c <= 'Z' {
 			b[i] = c + 'a' - 'A'
 		}
 	}

@@ -72,7 +72,7 @@ func pagePlugins(t *testing.T) (on, off string) {
 
 func pageMux() http.Handler {
 	mux := http.NewServeMux()
-	pluginPageRoutes(mux)
+	pluginPageRoutes(mux, false)
 	mux.HandleFunc("GET /api/state", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, map[string]string{"secret": "the window's"})
 	})
@@ -109,7 +109,7 @@ func TestPluginPageServedShutIn(t *testing.T) {
 		t.Fatalf("the page: %d %s", w.Code, w.Body)
 	}
 	csp := w.Header().Get("Content-Security-Policy")
-	for _, want := range []string{"sandbox allow-scripts", "default-src 'none'", "connect-src 'none'", "script-src 127.0.0.1:3437" + pluginPagePrefix + tok + "/;", "form-action 'none'", "frame-src 'none'"} {
+	for _, want := range []string{"sandbox allow-scripts", "default-src 'none'", "connect-src 'none'", "script-src https://127.0.0.1:3437" + pluginPagePrefix + tok + "/ http://127.0.0.1:3437" + pluginPagePrefix + tok + "/;", "form-action 'none'", "frame-src 'none'"} {
 		if !strings.Contains(csp, want) {
 			t.Errorf("policy %q has no %q", csp, want)
 		}
@@ -139,7 +139,7 @@ func TestPluginPageServedShutIn(t *testing.T) {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.URL.Path = path
 		w := httptest.NewRecorder()
-		servePluginPage(w, r)
+		servePluginPage(w, r, false)
 		if w.Code == 200 || strings.Contains(w.Body.String(), "SECRET") || strings.Contains(w.Body.String(), `"name"`) {
 			t.Errorf("%s: %d %s", path, w.Code, w.Body)
 		}

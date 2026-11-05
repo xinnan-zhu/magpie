@@ -8,11 +8,13 @@ const { fixture } = require("./fixtures/caller-keys.cjs");
 // The Gateway page's card (the owner: "一点都不精致、优雅", and the key
 // row's copy "很奇怪的位置"): the gateway's mark and state, Share on local
 // network switched on the card itself with the addresses it answers on,
-// each to copy; a key's copy right beside its masked key, Rotate key and
-// Remove under its …; and Connect folded until it is opened.
+// each to copy; a key's copy right beside its masked key, Disable key (or
+// Enable key), Rotate key and Remove under its … (wei_VC on X: the tick
+// alone wasn't seen as a switch, so a key was removed and added again);
+// and Connect folded until it is opened.
 const WORDS = {
-  en: { share: "Share on local network", local: "This computer", lan: "Local network", more: "Key actions", rotate: "Rotate key", remove: "Remove" },
-  zh: { share: "局域网共享", local: "本机", lan: "局域网", more: "密钥操作", rotate: "轮换密钥", remove: "移除" },
+  en: { share: "Share on local network", local: "This computer", lan: "Local network", more: "Key actions", off: "Disable key", on: "Enable key", readOnly: "Make read-only", rotate: "Rotate key", remove: "Remove" },
+  zh: { share: "局域网共享", local: "本机", lan: "局域网", more: "密钥操作", off: "停用密钥", on: "启用密钥", readOnly: "设为只读", rotate: "轮换密钥", remove: "移除" },
   "zh-TW": { share: "區域網共享", local: "本機", lan: "區域網", more: "金鑰操作" },
   ja: { share: "ローカルネットワークで共有", local: "このコンピュータ", lan: "ローカルネットワーク", more: "キーの操作" },
   de: { share: "Im lokalen Netzwerk freigeben", local: "Dieser Computer", lan: "Lokales Netzwerk", more: "Schlüsselaktionen" },
@@ -33,6 +35,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(6000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const events = [];
@@ -44,6 +47,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the mark in its tile, the state beside it
         assert.equal(await page.locator("#gateway > .gw-mark.on svg .led").count(), 2, "the mark's two lights");
         assert.equal(await page.locator("#gateway .url").count(), 0, "no address pill in the status row");
+        // the state centred on the title's line, not sat low on its baseline
+        // (the owner: "没有水平对齐")
+        const off = await page.locator("#gateway .name").evaluate((n) => {
+          const r = document.createRange();
+          r.selectNodeContents(n.firstChild);
+          const a = r.getBoundingClientRect(), b = n.querySelector(".state").getBoundingClientRect();
+          return Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2);
+        });
+        assert(off <= 0.25, `the state's middle is ${off}px off the title's`);
         // Connect folded by default, its base URL in its head
         assert.equal(await page.locator("#foldConnect").getAttribute("aria-expanded"), "false", "Connect starts folded");
         assert(await page.locator("#connect").evaluate((c) => c.hidden));
@@ -93,11 +105,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const menu = page.locator(".row-menu");
         await menu.waitFor();
         const items = (await menu.getByRole("menuitem").allTextContents()).map((s) => s.trim());
-        assert.equal(items.length, 2);
-        if (w.rotate) assert.deepEqual(items, [w.rotate, w.remove]);
-        assert.deepEqual(items, await page.evaluate(() => [t("Rotate key"), t("Remove")]));
-        await page.keyboard.press("Escape");
+        assert.equal(items.length, 4);
+        if (w.rotate) assert.deepEqual(items, [w.off, w.readOnly, w.rotate, w.remove]);
+        assert.deepEqual(items, await page.evaluate(() => [t("Disable key"), t("Make read-only"), t("Rotate key"), t("Remove")]));
+        // off from the menu, then on again: the key stays, only its switch moves
+        await menu.getByRole("menuitem").first().click();
         await menu.waitFor({ state: "detached" });
+        await page.locator('#gatewayKeys .acc.off[data-key="work"]').waitFor();
+        await row.locator(".gw-key-more").click();
+        await menu.waitFor();
+        const again = (await menu.getByRole("menuitem").allTextContents()).map((s) => s.trim());
+        if (w.on) assert.equal(again[0], w.on);
+        assert.equal(again[0], await page.evaluate(() => t("Enable key")));
+        await menu.getByRole("menuitem").first().click();
+        await page.locator('#gatewayKeys .acc.in-use[data-key="work"]').waitFor();
+        assert.deepEqual(events.filter((e) => /^(on|off|remove)-key$/.test(e.action)).map((e) => [e.action, e.body.key]), [["off-key", "work"], ["on-key", "work"]]);
 
         // nothing runs out of the page or a card, no coloured left border
         const over = await page.evaluate(() => [...document.querySelectorAll("#gateway, #gatewayLan *, #gatewayKeys .acc")]

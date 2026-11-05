@@ -66,11 +66,47 @@ var claudeUsageLineRE = regexp.MustCompile(`^Current (session|week(?: \(([^)]+)\
 // without an allowance. This says nothing about the account's limits.
 var errClaudeUsageUnavailable = errors.New("Claude Code's /usage is temporarily unavailable")
 
+// claudeUsageUnknown is a /usage read that told nothing of the account,
+// for a reason that passes: Claude Code's own "temporarily unavailable",
+// or a panel that couldn't load its figures (the helper's "/usage
+// couldn't load the plan's usage": still "Loading usage data…", or
+// "Failed to load usage data" after a retry). The card keeps the
+// account's last reading. Windows' pseudo console showed 2.1.316's panel
+// while it still loaded, and the card said the account had no allowance
+// (Seagull fries).
+var claudeUsageUnknown = regexp.MustCompile(`^(?:Claude Code: )?(?:` + regexp.QuoteMeta(errClaudeUsageUnavailable.Error()) + `|/usage couldn't load the plan's usage)`)
+
 var errClaudeCannotRun = errors.New("Claude Code can't be run from here")
 
 // An account error stays visible even when it also mentions a timeout or
 // rate limit. It is not a temporary failure to read the usage endpoint.
-var claudeUsageDenied = regexp.MustCompile(`(?i)\b(401|403)\b|not (logged|signed) in|signed out|sign-in (has )?expired|unauthorized|forbidden|authentication (failed|required)|invalid (access )?token|(session|usage) limit|hit your limit|using your overages`)
+var claudeUsageDenied = regexp.MustCompile(`(?i)\b(401|403)\b|not (logged|signed) in|signed out|sign-in (has )?expired|unauthorized|forbidden|authentication (failed|required)|invalid (access )?token|(session|usage) limit|hit your limit`)
+
+// claudeOverages is /usage's line for an account past its plan's limits
+// and billed for what it uses ("You are currently using your overages to
+// power your Claude Code usage. We will automatically switch you back to
+// your subscription rate limits when they reset"), which Claude Code
+// prints above the account's windows. It is no account error: read as
+// one, the reading had no windows and an error, and the switch, which
+// stays on an account it can't read, left Claude Code spending overages
+// with other accounts that had room (StringKe, #4532).
+var claudeOverages = regexp.MustCompile(`(?i)using your overages`)
+
+// claudeOveragesWindow is the window an account on overages is read with,
+// beside ws: spent (usedPast, roomLeft), so the switch moves Claude Code
+// off it as off one whose window is used up, and told as its text. It
+// ends when the last of ws's used-up windows renews, as Claude Code's
+// overages do; none named, at the next reading.
+func claudeOveragesWindow(ws []QuotaWindow) QuotaWindow {
+	// the GUI says a Text row used 100 "In use" in the reader's language
+	w := QuotaWindow{Name: "Extra usage", Used: 100, Display: "In use", Text: true}
+	for _, x := range ws {
+		if x.Used >= 100 && x.ResetsAt != nil && (w.ResetsAt == nil || x.ResetsAt.After(*w.ResetsAt)) {
+			w.ResetsAt = x.ResetsAt
+		}
+	}
+	return w
+}
 
 // parseClaudeUsage reads /usage's windows; now dates a reset that names no
 // year.
@@ -97,7 +133,16 @@ func parseClaudeUsage(text string, now time.Time) ([]QuotaWindow, error) {
 		w := QuotaWindow{Name: "5 hours", Used: used, Span: 5 * time.Hour}
 		if m[1] != "session" {
 			w.Name, w.Span = "7 days", week
-			if scope := strings.TrimSpace(m[2]); scope != "" && !strings.EqualFold(scope, "all models") {
+			// "Sonnet only" (Claude Code 2.1.316's week of Sonnet) is the
+			// Sonnet week: "7 days · Sonnet", counting sonnet, the window
+			// its seven_day_sonnet header keeps (claudeKinds). Read whole,
+			// it counted models named "sonnet-only", which none is, so
+			// routing never saw the Sonnet week used up (StringKe, #4532)
+			scope := strings.TrimSpace(m[2])
+			if s, ok := strings.CutSuffix(strings.ToLower(scope), " only"); ok && s != "" {
+				scope = strings.TrimSpace(scope[:len(s)])
+			}
+			if scope != "" && !strings.EqualFold(scope, "all models") {
 				w.Name, w.Model = "7 days · "+scope, claudeScopeModel(scope)
 			}
 		}
@@ -109,14 +154,19 @@ func parseClaudeUsage(text string, now time.Time) ([]QuotaWindow, error) {
 		}
 		out = append(out, w)
 	}
+	if slices.ContainsFunc(lines, claudeOverages.MatchString) {
+		out = append(out, claudeOveragesWindow(out))
+	}
 	if len(out) == 0 {
 		if text == "" || slices.ContainsFunc(lines, func(line string) bool {
 			return strings.TrimSuffix(strings.TrimSpace(line), ".") == "You are currently using your subscription to power your Claude Code usage"
 		}) {
 			return out, errClaudeUsageUnavailable
 		}
+		// a panel with no figure says nothing of the account's allowance:
+		// unknown, its words told
 		first, _, _ := strings.Cut(text, "\n")
-		return out, errors.New("Claude Code's /usage told no allowance: " + clipLine(first))
+		return out, errors.New("Claude Code's /usage showed no usage figures: " + clipLine(first))
 	}
 	return out, nil
 }

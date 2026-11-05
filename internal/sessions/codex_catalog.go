@@ -411,6 +411,9 @@ var tidyOnce sync.Once
 // rollout is gone out of it, once a run of magpie: those magpie deleted
 // before it did so itself.
 func TidyCodexCatalog() {
+	if !Reads("codex") {
+		return
+	}
 	tidyOnce.Do(func() {
 		mu.Lock()
 		defer mu.Unlock()

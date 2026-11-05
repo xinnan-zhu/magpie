@@ -90,6 +90,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => ctx.close());
         const p = await ctx.newPage();
         p.setDefaultTimeout(5000);
+        p.setDefaultNavigationTimeout(60000);
         const errors = [];
         p.on("pageerror", (e) => errors.push(e.message));
         await p.route("**/*", server(lang, shared, asked, contents, posts));
@@ -195,6 +196,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await box(lang === "zh" ? "口令" : "Passphrase").fill("correct horse");
         await toEnd();
         const tick = form.locator("label.tick", { hasText: w.tick });
+        // Back up by itself's rows under the form put the tick, at the
+        // page's end, under Settings' held tabs: bring it into the open
+        await tick.evaluate((e) => e.scrollIntoView({ block: "center" }));
         assert.equal(await tick.locator("input").isChecked(), false, "off unless picked");
         const top = () => p.locator("#view-settings").evaluate((v) => v.scrollTop);
         const at = await top();

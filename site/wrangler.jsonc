@@ -4,6 +4,9 @@
   "name": "usemagpie",
   "main": "worker.js",
   "compatibility_date": "2026-09-01",
+  // the contributors page's list, from git history (credits-cli.mjs); a
+  // build that can't read git or GitHub keeps the last list, or none
+  "build": { "command": "node credits-cli.mjs wall" },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

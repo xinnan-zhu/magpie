@@ -57,6 +57,8 @@ const groupUsage = `usage:
                                           listed or served — yours, and found ones you changed, stay — and an
                                           agent set to one is moved to its model from one provider; on brings
                                           them back
+  magpie group auto skip <provider>…      keep providers out of the groups magpie finds (groups you made or
+                                          changed keep them); skip none lets every one back in
   magpie group rule add|rm|mv <id> …      rules: which model a turn goes to first, by its length, an image,
                                           the reasoning asked for or the agent (magpie group rule help)
 
@@ -88,6 +90,8 @@ const groupUsage = `usage:
            how many models each matches now, and says when one matches nothing
   routing  smart   (default) of the subscriptions with quota to spare, the one renewing soonest first
            order   the first model until it can't answer, then the next
+           drain   one account or key until it is used up, then the next, and stays there: an
+                   earlier one that renews meanwhile doesn't take the requests back
            rotate  each conversation's next turn goes to the next member's account or key
            usage   the account or key with the most of its allowance left first
            pace    the account with the most of its week left per hour until it renews first, so less
@@ -109,7 +113,9 @@ const groupUsage = `usage:
                    asked in words — rates how hard it is, and the turn's requests
                    reason at low, medium, high or xhigh in place of the agent's level; only those
                    the agent asked to reason, never one it turned off (none). A route's effort
-                   is what the agent asked, each try's what its model was sent
+                   is what the agent asked, each try's what its model was sent. A group in the
+                   group, effort=auto of its own, is asked only when this one gave no pick:
+                   the outermost pick stands
 
   e.g. magpie group add "Opus anywhere" models=claude/claude-opus-5-5,copilot/claude-opus-5.5 routing=order
        magpie group set opus-anywhere stays=session models+=openrouter/anthropic/claude-opus-5.5
@@ -121,6 +127,9 @@ const groupUsage = `usage:
        magpie group add my-free-pool models='openrouter/*:free,opencode-zen/*-free' routing=order
        magpie group set opus-anywhere routing=weight weight=claude/claude-opus-5-5=3
        magpie group set deepseek-anywhere routing=fast   # the provider that answered it fastest lately first
+       magpie group set deepseek-anywhere routing=cheap  # the provider it costs least on now first (DeepSeek's off-peak hours)
+       magpie group set free-pool routing=drain          # one account until it is used up, then the next, never back
+       magpie group set checkins routing=expiring        # free quota first, the soonest to expire first; paid only when none is left
        magpie group pick opus-anywhere copilot/claude-opus-5.5
        magpie claude group/opus-anywhere`
 
@@ -138,6 +147,9 @@ var routingNames = []struct {
 	{provider.Weighted, "weight", []string{"weighted", "by-weight", "weighted-round-robin", "wrr"}},
 	{provider.FreeFirst, "free", []string{"free-first", "freest", "no-cost"}},
 	{provider.Fastest, "fast", []string{"fastest", "speed", "speed-first"}},
+	{provider.Cheapest, "cheap", []string{"cheapest", "cheapest-first", "price", "cost"}},
+	{provider.Drain, "drain", []string{"until-used-up", "use-up", "sticky"}},
+	{provider.FreeExpiring, "expiring", []string{"free-expiring", "free-expiry", "free-soonest", "soonest-free"}},
 	{provider.Manual, "manual", []string{"pick", "picked", "pinned"}},
 }
 
@@ -960,6 +972,9 @@ func autoGroupsCmd(args []string) error {
 		} else {
 			fmt.Println("found groups are", amber.Render("off"), muted.Render("· only the groups you made or changed; magpie group auto on brings the others back"))
 		}
+		if skip := provider.AutoGroupSkip(); len(skip) > 0 {
+			fmt.Println("left out:", strings.Join(skip, ", "), muted.Render("· magpie group auto skip none lets them back in"))
+		}
 		return nil
 	}
 	var on bool
@@ -967,8 +982,10 @@ func autoGroupsCmd(args []string) error {
 	case "on", "true", "yes", "1":
 		on = true
 	case "off", "false", "no", "0":
+	case "skip":
+		return autoGroupSkipCmd(args[1:])
 	default:
-		return fmt.Errorf("magpie group auto [on|off]")
+		return fmt.Errorf("magpie group auto [on|off|skip <provider>…|skip none]")
 	}
 	if len(args) > 1 {
 		return fmt.Errorf("magpie group auto [on|off]")
@@ -982,6 +999,47 @@ func autoGroupsCmd(args []string) error {
 		fmt.Println(green.Render("✓"), "found groups are on", muted.Render("· a model two or more providers serve is a group of them again"))
 	} else {
 		fmt.Println(green.Render("✓"), "found groups are off", muted.Render("· the groups you made or changed stay; a request for an auto- group goes to its model from one provider"))
+	}
+	return nil
+}
+
+// autoGroupSkipCmd keeps the providers named out of the groups magpie
+// finds, the others back in (provider.SetAutoGroupSkip; chenxiang0010 on
+// Discord); "none" lets every one back in, and no name says which are
+// out. A name magpie has no provider of is refused, never kept.
+func autoGroupSkipCmd(args []string) error {
+	if len(args) == 0 {
+		skip := provider.AutoGroupSkip()
+		if len(skip) == 0 {
+			fmt.Println("no provider is left out of found groups", muted.Render("· magpie group auto skip <provider>… leaves them out"))
+		} else {
+			fmt.Println("left out of found groups:", strings.Join(skip, ", "))
+		}
+		return nil
+	}
+	var ids []string
+	if !(len(args) == 1 && strings.EqualFold(args[0], "none")) {
+		have := map[string]bool{}
+		for _, p := range provider.All() {
+			have[p.ID] = true
+		}
+		for _, a := range args {
+			id := strings.ToLower(strings.TrimSpace(a))
+			if !have[id] {
+				return fmt.Errorf("no provider %q (magpie providers lists their ids)", a)
+			}
+			ids = append(ids, id)
+		}
+	}
+	moved, err := agent.Reseat(func() error { return provider.SetAutoGroupSkip(ids) })
+	if err != nil {
+		return err
+	}
+	defer printMoved(moved)
+	if len(ids) == 0 {
+		fmt.Println(green.Render("✓"), "no provider is left out of found groups")
+	} else {
+		fmt.Println(green.Render("✓"), "left out of found groups:", strings.Join(ids, ", "), muted.Render("· the groups you made or changed keep them"))
 	}
 	return nil
 }
@@ -1024,7 +1082,7 @@ func groups() error {
 			r.how += muted.Render(fmt.Sprintf(" · %d rule%s", n, map[bool]string{true: "", false: "s"}[n == 1]))
 		}
 		sep, ready := muted.Render(" · "), false
-		if g.Routing == provider.Ordered {
+		if g.Routing == provider.Ordered || g.Routing == provider.Drain {
 			sep = muted.Render(" → ")
 		}
 		var ms []string

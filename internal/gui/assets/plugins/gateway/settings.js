@@ -78,9 +78,55 @@ function renderPort(s) {
 // lists each model by its own id as well, gpt-5.6-sol beside
 // codex/gpt-5.6-sol. Posted on its own; off by default.
 function renderBareIds(s) {
+  renderBusyLoad(s); // the row under it
   $("#bareIdsSegs").replaceChildren(segs([[false, t("Off")], [true, t("On")]], !!s.bareModelIDs, (on) =>
     writingPrefs(api("settings/bare-ids", { on })).then((ns) => { prefs = state.settings = ns; renderSettings(); })
       .catch((e) => { status(t(e.message), "err"); renderSettings(); })));
+}
+
+// renderBusyLoad: the load past which a model its plugin says is busy
+// (magpie.load) goes behind the others (settings.BusyLoad, axelburks on
+// Discord). Custom… opens a field for any other number, 1 to 9999, which
+// is then shown as its own choice; Enter or Apply saves it, Escape closes
+let busyDraft = null;
+const BUSY_CUSTOM = -1;
+function renderBusyLoad(s) {
+  const at = s.busyLoad || 0, sub = $("#busyLoadRow .sub"), d = busyDraft;
+  const put = (n) => writingPrefs(api("settings/busy-load", { at: n })).then((ns) => { busyDraft = null; prefs = state.settings = ns; renderSettings(); })
+    .catch((e) => { status(t(e.message), "err"); renderSettings(); });
+  sub.dataset.en ??= sub.textContent; // its English, as translateStatic keeps it
+  sub.classList.toggle("err", !!d?.err);
+  sub.textContent = d ? d.err || t("A load is in percent, as the plugin reports it: 100 is all its vendor serves at once, and past 100 requests queue (200 is twice that). Type 1 to 9999") : t(sub.dataset.en);
+  if (d) {
+    const field = input(d.value, "150");
+    field.className = "words busy-load-at";
+    field.style.cssText = "width:84px;flex:none";
+    field.inputMode = "numeric";
+    field.setAttribute("aria-label", t("Busy models last"));
+    const save = el("button", "text", t("Apply")), no = el("button", "text", t("Cancel"));
+    const close = () => { busyDraft = null; renderBusyLoad(s); };
+    save.onclick = () => {
+      const v = field.value.trim(), n = Number(v);
+      if (!/^\d+$/.test(v) || n < 1 || n > 9999) { busyDraft = { value: field.value, err: t("Type a whole number from 1 to 9999") }; renderBusyLoad(s); return $("#busyLoadRow .busy-load-at").focus(NO_SCROLL); }
+      save.disabled = true;
+      put(n);
+    };
+    no.onclick = close;
+    field.oninput = () => { d.value = field.value; };
+    field.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save.onclick(); if (e.key === "Escape") close(); };
+    const val = el("div", "val");
+    val.append(field, save, no);
+    return $("#busyLoadSegs").replaceChildren(val);
+  }
+  const opts = [0, 50, 70, 80, 90];
+  if (!opts.includes(at)) opts.push(at);
+  opts.sort((a, b) => a - b);
+  $("#busyLoadSegs").replaceChildren(segs([...opts.map((n) => [n, n ? t("Over {n}%", { n }) : t("Off")]), [BUSY_CUSTOM, t("Custom…")]], at, (n) => {
+    if (n !== BUSY_CUSTOM) return put(n);
+    busyDraft = { value: [0, 50, 70, 80, 90].includes(at) ? "" : String(at), err: "" };
+    renderBusyLoad(s);
+    $("#busyLoadRow .busy-load-at").focus(NO_SCROLL);
+  }));
 }
 
 // renderCORS: the web pages whose scripts may call the gateway from a
@@ -227,24 +273,44 @@ let lanSelectedURL = "", lanProtocol = "openai";
 // the address picked under Share on local network is kept like Connect's
 let lanWant = "";
 try { lanWant = localStorage.getItem("magpie.lanAddress") || ""; } catch {}
-// lanShown: the local network addresses the gateway is offered at, and a
-// line on them when magpie runs in a container, for Settings and Gateway
-// alike. In a container magpie finds only the container's own addresses;
-// the page opened over the network was reached at the host's, so the
-// gateway is offered there, on its port.
-function lanShown(urls, container) {
-  if (!container) return { urls, sub: "" };
-  const host = location.hostname, port = urls.length ? new URL(urls[0]).port : "";
-  if (web && host && port && !/^(localhost|127\.|\[::1\]$)/.test(host))
-    return { urls: ["http://" + host + ":" + port], // an IPv6 hostname comes bracketed
-      sub: t("Where this page was opened, on the gateway’s port; MAGPIE_PUBLIC_URL sets another") };
-  return { urls, sub: t("The container’s own addresses, which other devices can’t reach: set MAGPIE_PUBLIC_URL to the host’s") };
+// lanShown: the addresses the gateway is offered at beyond this computer,
+// those of them for other containers on this host, and a line on them
+// when magpie runs in a container, for Settings, Gateway, Connect, the
+// sidebar and the key page alike. In a container magpie finds only its
+// own addresses; the page opened over the network was reached at the
+// host's, so the gateway is offered there, on its port. Other containers
+// on the host reach it at the host's Docker bridge address, the
+// container's default route (jiezhengj on Discord: other containers on a
+// NAS needed http://172.17.0.1:3425), which follows, said to be theirs.
+function lanShown(urls, container, bridge) {
+  const others = bridge ? [bridge] : [];
+  if (!container) return { urls: [...urls, ...others.filter((u) => !urls.includes(u))], others, sub: "" };
+  const host = location.hostname, at = urls[0] || bridge ? new URL(urls[0] || bridge) : null;
+  if (web && host && at?.port && !/^(localhost|127\.|\[::1\]$)/.test(host))
+    return { urls: [at.protocol + "//" + host + ":" + at.port, ...others], others, // an IPv6 hostname comes bracketed
+      sub: others.length ? t("Other devices use the host’s address this page was opened at, and other containers on this host the host’s Docker bridge address, both on the gateway’s port; MAGPIE_PUBLIC_URL sets another")
+        : t("Where this page was opened, on the gateway’s port; MAGPIE_PUBLIC_URL sets another") };
+  if (others.length) return { urls: others, others,
+    sub: t("Other containers on this host use the host’s Docker bridge address, on the gateway’s port; other devices use the host’s own, which MAGPIE_PUBLIC_URL puts here") };
+  return { urls, others, sub: t("The container’s own addresses, which other devices can’t reach: set MAGPIE_PUBLIC_URL to the host’s") };
+}
+// gwLAN: lanShown for the gateway's read (providers', or boot.js's line),
+// which says whether its addresses are a container's and where other
+// containers reach it
+function gwLAN(g) {
+  return lanShown(g?.lan && g.lanURLs || [], !!g?.container, g?.lan && g.containerHost || "");
+}
+// gwFar: where other machines reach the gateway, for the sidebar and the
+// key page: other containers' address only when there is no other
+function gwFar(g) {
+  const { urls, others } = gwLAN(g), far = urls.filter((u) => !others.includes(u));
+  return far.length ? far : urls;
 }
 // sideLAN: where other machines reach the gateway while it is shared, for
 // the sidebar's line (coeo91 on Discord): MAGPIE_PUBLIC_URL, else the
 // address picked here, else the first
 function sideLAN(g) {
-  const u = g.lan && g.lanURLs || [];
+  const u = gwFar(g);
   return u[0] && (g.publicURL || (u.includes(lanWant) ? lanWant : u[0]));
 }
 // the line was drawn from boot.js before this script came
@@ -274,7 +340,7 @@ function renderLAN(s) {
   row(t("Share on local network"), t("Agents on other computers on this network, or through a tunnel to this one such as Cloudflare Tunnel, can use magpie’s models with a gateway key from Gateway"), "",
     segs([["off", t("Off")], ["on", t("On")]], s.lan ? "on" : "off", (v) => set({ on: v === "on" })));
   if (!s.lan) return;
-  const { urls, sub } = lanShown(s.lanURLs || [], s.lanContainer);
+  const { urls, others, sub } = lanShown(s.lanURLs || [], s.lanContainer, s.lanContainerHost);
   if (!urls.length) row(t("Address"), t("This computer has no local network address right now"), "");
   else {
     lanSelectedURL = urls.includes(lanWant) ? lanWant : urls[0];
@@ -291,7 +357,7 @@ function renderLAN(s) {
         e.stopPropagation();
         if (address.classList.contains("open")) return closeProtoMenu();
         const suffix = lanProtocol === "openai" ? "/v1" : "";
-        openProtoMenu(address, urls.map((u) => ({ v: u, name: u + suffix, note: far.has(u) ? t("On the internet") : "" })), lanSelectedURL,
+        openProtoMenu(address, urls.map((u) => ({ v: u, name: u + suffix, note: far.has(u) ? t("On the internet") : others.includes(u) ? t("Other containers on this host") : "" })), lanSelectedURL,
           (v) => { lanSelectedURL = lanWant = v; keepPick("magpie.lanAddress", v); update(); renderSideGw(); }, "Address", "lan-address-menu");
       };
     }
@@ -360,7 +426,7 @@ function renderWebPage(asked) {
     segs([["", t("Off")], ["local", t("This computer")], ["lan", t("Local network")]], s.mode || "", (mode) => set({ mode }))).classList.add("web-page-mode");
   if (s.mode) {
     const why = s.error ? el("div", "sub err", s.error.startsWith("port ") ? t("Port {p} is taken by another program, magpie web perhaps: magpie tries again every few seconds", { p: s.port }) : t(s.error))
-      : el("div", "sub", s.serving ? t("Served; anyone with this link can change every setting") : t("Starting…"));
+      : el("div", "sub say", s.serving ? t("Served; anyone with this link can change every setting") : t("Starting…"));
     const links = [s.link, ...(s.mode === "lan" ? s.network || [] : [])].filter(Boolean);
     const box2 = el("div", "web-page-links");
     for (const l of links) {

@@ -23,6 +23,8 @@
   };
   const CELLS = 400;
   const partName = (k) => t(PART_NAMES[k] || k);
+  // the Codexes here before 0.163 or of no known version (app.js too)
+  const codexHeld = window.codexHeld = (held) => t("{who}: the share needs Codex 0.163 or later; until it's updated magpie writes only async_compaction = true, at 65%", { who: held.map((r) => t({ app: "Codex app", ide: "Codex editor extension", wsl: "Codex in WSL" }[r.kind] || "Codex CLI") + (r.version ? " " + r.version : "")).join(", ") });
 
   const fmtK = (n) => {
     n = Math.max(0, Math.round(n || 0));
@@ -40,8 +42,20 @@
     return s[s.length >> 1];
   };
   const agentMeta = (id) => (state.clients || state.agents || []).find((a) => a.id === id);
-  const agentLabel = (id) => agentMeta(id)?.name || id || t("your agent");
+  // "scripts": requests naming only a library (context.go's scriptsAgent)
+  const agentLabel = (id) => (id === "scripts" ? t("Scripts") : agentMeta(id)?.name || id || t("your agent"));
   const agentIcon = (id) => icon(agentMeta(id)?.icon || "generic");
+  // the lab a model id is from, by its name after the provider's; none when
+  // it isn't known, so a wrong logo never stands for it
+  const LABS = [[/claude/, "claude-color"], [/gpt|^o\d|codex/, "openai"], [/gemma/, "gemma-color"], [/gemini/, "gemini-color"],
+    [/deepseek/, "deepseek-color"], [/qwen|qwq/, "qwen-color"], [/kimi|moonshot/, "kimi"], [/glm/, "zhipu-color"], [/grok/, "grok"],
+    [/minimax|abab/, "minimax-color"], [/doubao|seed/, "doubao-color"], [/stral/, "mistral-color"], [/llama/, "meta-color"],
+    [/mimo/, "xiaomimimo"], [/^step/, "stepfun-color"], [/hunyuan/, "hunyuan-color"]];
+  const labIcon = (model) => {
+    const m = model.toLowerCase().split("/").pop();
+    const hit = LABS.find(([re]) => re.test(m));
+    return hit ? [icon(hit[1])] : [];
+  };
 
   // what an item of the prompt is called: a file's path or a tool's name
   // as it is; magpie's own names for the rest in the reader's language
@@ -179,12 +193,10 @@
     return box;
   }
 
-  // A card's narrow layouts go by its own width, as container queries
-  // would, set here as classes (max520: 520px wide or less). Not by
-  // container queries: WebKit pulled a view scrolled to its end back up by
-  // a card's height each time the card was drawn again (#1249). A card
-  // drawn again starts with the width the last one in its place had, so it
-  // doesn't lay out wide for a moment and pull the page up as it narrows
+  // Narrow layouts go by the card's own width, as classes (max520), not
+  // container queries: WebKit pulled a view scrolled to its end up by a
+  // card's height on each redraw (#1249). A redrawn card starts at the last
+  // width in its place, so it never lays out wide and pulls the page up
   const cardWidth = {};
   const sizeCard = (card, w) => {
     card.classList.toggle("max520", w <= 520);
@@ -194,6 +206,7 @@
     for (const e of all) {
       if (!e.target.isConnected) { cardSizes.unobserve(e.target); continue; }
       const card = e.target, w = e.contentRect.width;
+      if (!w) continue; // out of sight (#4652)
       cardWidth[card.dataset.place] = w;
       // on the next frame: a class changed in the observer's own call
       // changes the card's height, which WebKit reports as a
@@ -202,12 +215,10 @@
     }
   });
 
-  // morph makes old what neu is, keeping old's nodes wherever they are of
-  // the same kind: a card drawn again for the next request is patched in
-  // place, not put in afresh (Zhenzhen on Discord: each live request
-  // flashed the whole card, its cells coming in again). Handlers set as
-  // properties come along; one added with addEventListener wouldn't, so
-  // nothing morphed has one.
+  // morph makes old what neu is, keeping old's nodes of the same kind: a
+  // redrawn card is patched in place (Zhenzhen on Discord: each live
+  // request flashed the whole card). Only handlers set as properties come
+  // along, so nothing morphed uses addEventListener.
   const HANDLERS = ["onclick", "onpointerenter", "onpointerleave", "onkeydown"];
   function morph(old, neu) {
     if (old.nodeName !== neu.nodeName || (old.nodeType !== 1 && old.nodeType !== 3)) { old.replaceWith(neu); return neu; }
@@ -386,19 +397,31 @@
   // ctxCard draws a route's prompt. opts: series (the session's prompts,
   // [{id, tokens, time}]), onPoint (a point of it clicked), cache ({read,
   // total}, when the route carries no usage), crumbs (the footer's path),
-  // place (where it is drawn, for its width: see cardWidth). The card's
-  // ctxUpdate(r, opts) draws another route, or the same one further on, in
-  // it: what is the same stays the same nodes, its grid's cells among them,
-  // so nothing flashes or comes in again and the grid keeps its height
-  // a card that folds (Routing's, opts.foldable) keeps the reader's
-  // choice: folded, it is its head alone, with how full the window is
-  // beside the title, so the request list under it has the room
-  // (0xBCD18E on X: it took most of the height, three rows were left)
+  // place (for its width: see cardWidth). The card's ctxUpdate(r, opts)
+  // draws another route in it, keeping the nodes that are the same (grid
+  // cells too), so nothing flashes and the grid keeps its height.
+  // A foldable card (Routing's) keeps the reader's choice: folded, it is its
+  // head alone with how full the window is, so the request list has room
+  // (0xBCD18E on X: it took most of the height)
   let ctxShut = false;
   try { ctxShut = localStorage.getItem("magpie.ctxShut") === "1"; } catch {}
   // opts.open: this request was opened to see its context window (the
   // Usage page's Context tab), so it shows unfolded, it alone: the next
   // request drawn in the card takes the reader's choice again
+  // a window as a thin bar, a part each
+  function stackBar(p) {
+    const w = p.window || 0, bar = el("span", "ctx-stack"), scale = Math.max(w, p.tokens, 1);
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", t("{used} of {window} tokens used", { used: fmtK(p.tokens), window: fmtK(w || p.tokens) }));
+    for (const k of PARTS) {
+      const i = el("i", "k-" + k), n = (p.parts || []).find((x) => x.kind === k)?.tokens || 0;
+      i.title = partName(k);
+      i.style.width = +(Math.max(0, n) / scale * 100).toFixed(2) + "%";
+      bar.append(i);
+    }
+    return bar;
+  }
+  window.ctxStack = stackBar;
   function ctxCard(r, opts = {}) {
     const card = el("div", "ctx-card" + (opts.foldable && ctxShut && !opts.open ? " shut" : ""));
     card.dataset.place = opts.place || "";
@@ -701,7 +724,7 @@
         parts = cur = null;
         return;
       }
-      rid = r.id;
+      rid = r;
       const window = p.window || 0;
       const full = window ? p.tokens / window : 0;
       const live = !r.done;
@@ -749,24 +772,31 @@
         const short = el("span", "ctx-short");
         short.append(num("span", "", p.tokens), window ? " / " + fmtK(window) + " · " + pct(full) : "");
         head.append(short);
-        // folded, a thin bar of what fills the window, a part each; it is
-        // morphed with the head, so a live request moves its widths only
-        const bar = el("span", "ctx-stack");
-        bar.setAttribute("role", "img");
-        bar.setAttribute("aria-label", t("{used} of {window} tokens used", { used: fmtK(p.tokens), window: fmtK(window || p.tokens) }));
-        const scale = Math.max(window, p.tokens, 1);
-        for (const k of PARTS) {
-          const n = p.parts.find((x) => x.kind === k)?.tokens || 0;
-          const i = el("i", "k-" + k);
-          i.title = partName(k);
-          i.style.width = +(Math.max(0, n) / scale * 100).toFixed(2) + "%";
-          bar.append(i);
-        }
-        head.append(bar);
+        // folded, the bar: morphed, so a live request moves widths only
+        head.append(stackBar(p));
       }
       head.append(el("span", "grow"));
-      if (r.model) head.append(el("code", "ctx-model", r.model));
-      head.append(st);
+      // whose request it is and the model it went to; in a narrow card the
+      // agent's name goes first, its icon stays
+      const route = el("span", "ctx-route");
+      if (r.agent) {
+        const who = el("span", "ctx-who");
+        who.append(agentIcon(r.agent), el("span", "ctx-who-n", agentLabel(r.agent)));
+        route.append(who);
+      }
+      if (r.model) {
+        const what = el("span", "ctx-what");
+        what.append(...labIcon(r.model), el("code", "ctx-model", r.model));
+        if (r.agent) route.append(el("span", "ctx-sep", "›"));
+        route.append(what);
+      }
+      // the route and the state go together: where the title leaves them
+      // too little room they take a line of their own, the model id cut
+      // to fit there, and nothing is drawn over the title (packinggoods on
+      // Discord: in a narrow window the provider's icon sat on it)
+      const end = el("span", "ctx-end");
+      end.append(route, st);
+      head.append(end);
 
       // how full, and the cache
       const top = el("div", "ctx-top");
@@ -946,178 +976,8 @@
 
   // A part of the card clicked opens what the request sent there, read
   // from the request's body: an item alone (a tool, a file, a turn), or
-  // the part's items, each opened to its text. magpie keeps the last few
-  // requests' bodies, masked, in memory only, so an older one's text is
-  // gone. A long text comes a stretch at a time, so a prompt of megabytes
-  // doesn't hold the window up.
-  const TEXT_STEP = 20000, ITEM_STEP = 100;
-  const ROLE_NAMES = {
-    system: "System prompt", user: "You", assistant: "Assistant", thinking: "Thinking",
-    call: "Tool call", result: "Tool result", tool: "Tool definition", image: "Image", sealed: "Sealed",
-  };
-  async function readText(id, kind, item) {
-    const q = "id=" + encodeURIComponent(id) + "&kind=" + encodeURIComponent(kind) + (item === undefined ? "" : "&item=" + item);
-    // fetched, not api(): the text isn't looked through for accounts
-    const res = await fetch("/api/context/text?" + q);
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error((await res.text()).trim() || res.statusText);
-    return res.json();
-  }
-  // a stretch of text, and a button for the next
-  function longText(text) {
-    const box = el("div", "ctx-text-box");
-    const pre = el("pre", "ctx-text");
-    let at = 0;
-    const more = el("button", "text ctx-text-more");
-    more.type = "button";
-    const step = () => {
-      pre.append(document.createTextNode(text.slice(at, at + TEXT_STEP)));
-      at = Math.min(text.length, at + TEXT_STEP);
-      more.hidden = at >= text.length;
-      more.textContent = t("Show more · {n} characters left", { n: (text.length - at).toLocaleString(intlLang()) });
-    };
-    more.onclick = (e) => { e.stopPropagation(); step(); };
-    step();
-    box.append(pre, more);
-    return box;
-  }
-  // picture: an image the request carried, as it sent it (a data: URL
-  // the gateway checked is a PNG, JPEG, GIF or WebP). It fades in once
-  // decoded; clicked, it opens to its own size and back
-  function picture(src) {
-    const fig = el("button", "ctx-pic");
-    fig.type = "button";
-    fig.setAttribute("aria-expanded", "false");
-    const img = el("img");
-    img.alt = t("Image");
-    img.decoding = "async";
-    img.onload = () => fig.classList.add("in");
-    img.onerror = () => fig.replaceWith(el("div", "ctx-piece-note", t("An image: magpie doesn't show it here")));
-    img.src = src;
-    fig.append(img);
-    fig.onclick = (e) => {
-      e.stopPropagation();
-      const first = fig.getBoundingClientRect();
-      const open = fig.classList.toggle("open");
-      fig.setAttribute("aria-expanded", String(open));
-      if (calm() || !fig.animate) return;
-      const last = fig.getBoundingClientRect();
-      if (!first.width || !last.width) return;
-      fig.animate([{ transform: `scale(${first.width / last.width}, ${first.height / last.height})` }, { transform: "none" }],
-        { duration: 460, easing: IOS_EASE });
-    };
-    return fig;
-  }
-  function pieceView(pc) {
-    const box = el("div", "ctx-piece");
-    const head = el("div", "ctx-piece-head");
-    if (pc.role) head.append(el("span", "ctx-role r-" + pc.role, t(ROLE_NAMES[pc.role] || pc.role)));
-    if (pc.name) head.append(el("code", "ctx-piece-name", pc.name));
-    head.append(el("span", "grow"));
-    if (pc.text) head.append(copyBtn(pc.text, pc.name || t(ROLE_NAMES[pc.role] || "Text")));
-    box.append(head);
-    if (pc.role === "image" && pc.src) box.append(picture(pc.src));
-    else if (pc.role === "image") box.append(el("div", "ctx-piece-note", t("An image: magpie doesn't show it here")));
-    else if (pc.role === "sealed") box.append(el("div", "ctx-piece-note", t("Sealed by the vendor, {n} bytes: only the vendor can read it", { n: (pc.size || 0).toLocaleString(intlLang()) })));
-    else {
-      if (pc.size) box.append(el("div", "ctx-piece-note", t("Sealed by the vendor, {n} bytes: only the vendor can read it", { n: pc.size.toLocaleString(intlLang()) })));
-      if (pc.text) box.append(longText(pc.text));
-      else if (!pc.size) box.append(el("div", "ctx-piece-note", t("Empty")));
-    }
-    return box;
-  }
-  async function openCtxText(id, kind, pick) {
-    if (!id) return;
-    const ed = el("div", "editor ctx-view wide");
-    const head = el("div", "ehead");
-    const title = el("b", "", partName(kind));
-    const total = el("span", "ctx-view-total");
-    head.append(el("i", "dot k-" + kind), title, el("span", "grow"), total);
-    const body = el("div", "ctx-view-body");
-    body.append(el("div", "ctx-view-wait", t("Reading…")));
-    const bar = el("div", "bar");
-    const close = el("button", "text primary", t("Close"));
-    close.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
-    bar.append(el("span", "grow"), close);
-    ed.append(head, body, bar);
-    confirmAsk = ed;
-    openModal(ed);
-    $("#modal").classList.add("lib");
-    const gone = (n) => el("p", "ctx-view-gone", t("This request's text is no longer kept: magpie keeps the text of the last {n} requests, in memory only, while it runs.", { n }));
-    let list;
-    try { list = await readText(id, kind); } catch (err) { body.replaceChildren(el("p", "ctx-view-gone", err.message)); return; }
-    if (confirmAsk !== ed) return;
-    if (!list) return body.replaceChildren(gone(10));
-    const items = list.items || [];
-    total.textContent = fmtK(items.reduce((s, it) => s + it.tokens, 0)) + " " + t("tokens");
-    const note = el("p", "ctx-view-note", t("As magpie sent it, masked where masking is on. Kept in memory for the last {n} requests only.", { n: list.kept }));
-    // an item: its text alone; "N more" or the earlier turns: the part's list
-    const at = pick && pick.tag !== "more" && pick.tag !== "turns"
-      ? items.findIndex((it) => it.name === pick.name && (it.tag || "") === (pick.tag || "")) : -1;
-    const entry = (it, i, open) => {
-      const box = el("div", "ctx-vi");
-      const h = el("button", "ctx-vi-head");
-      h.type = "button";
-      h.setAttribute("aria-expanded", "false");
-      const tg = tagOf(it);
-      h.append(el("span", "tw"), itemLabel(it, kind));
-      h.querySelector(".tw").append(svg(CHEV, 10, 1.7));
-      if (it.n > 1) h.append(el("span", "ctx-x", "×" + it.n));
-      if (tg) h.append(el("code", "ctx-tag", tg));
-      h.append(el("span", "ctx-v", fmtK(it.tokens)));
-      const text = el("div", "ctx-vi-text");
-      text.hidden = true;
-      let read = null;
-      const show = async () => {
-        const on = text.hidden;
-        text.hidden = !on;
-        h.setAttribute("aria-expanded", String(on));
-        box.classList.toggle("open", on);
-        if (!on || read) return;
-        text.replaceChildren(el("div", "ctx-view-wait", t("Reading…")));
-        read = readText(id, kind, i).then((one) => {
-          const pieces = one?.items?.[i]?.pieces;
-          if (!pieces) { read = null; text.replaceChildren(gone(list.kept)); return; }
-          text.replaceChildren(...(pieces.length ? pieces.map(pieceView) : [el("div", "ctx-piece-note", t("Empty"))]));
-        }).catch((err) => { read = null; text.replaceChildren(el("p", "ctx-view-gone", err.message)); });
-      };
-      h.onclick = (e) => { e.stopPropagation(); show(); };
-      box.append(h, text);
-      if (open) show();
-      return box;
-    };
-    const showAll = () => {
-      title.textContent = partName(kind);
-      const rows = el("div", "ctx-vi-list");
-      let shown = 0;
-      const more = el("button", "text ctx-text-more");
-      more.type = "button";
-      const step = () => {
-        const next = items.slice(shown, shown + ITEM_STEP).map((it, j) => entry(it, shown + j, items.length === 1));
-        rows.append(...next);
-        shown += next.length;
-        more.hidden = shown >= items.length;
-        more.textContent = t("Show {n} more", { n: items.length - shown });
-      };
-      more.onclick = (e) => { e.stopPropagation(); step(); };
-      step();
-      body.replaceChildren(note, items.length ? rows : el("div", "ctx-empty", t("Nothing in it")), more);
-    };
-    if (at < 0) return showAll();
-    // the item alone, the part's other items a click away
-    title.textContent = partName(kind) + " · " + itemName(items[at]);
-    total.textContent = fmtK(items[at].tokens) + " " + t("tokens");
-    const all = el("button", "text ctx-view-all", t("All of {part} · {n}", { part: partName(kind), n: items.length }));
-    all.type = "button";
-    all.onclick = (e) => {
-      e.stopPropagation();
-      all.remove();
-      total.textContent = fmtK(items.reduce((s, it) => s + it.tokens, 0)) + " " + t("tokens");
-      showAll();
-    };
-    if (items.length > 1) bar.prepend(all);
-    body.replaceChildren(note, entry(items[at], at, true));
-  }
+  // the part's items, each opened to its text (ctxtext.js, loaded then)
+  const openCtxText = (...a) => import("./ctxtext.js").then((m) => m.open({ fmtK, partName, itemName, itemLabel, tagOf }, ...a)).catch(statusErr);
   window.openCtxText = openCtxText;
   window.ctxFmt = fmtK;
 
@@ -1185,7 +1045,9 @@
     const head = el("div", "ctx-agent-head");
     const who = el("div", "ctx-who");
     who.append(agentIcon(a.agent), el("b", "", agentLabel(a.agent)));
-    const meta = el("div", "ctx-who-sub", [count(a.requests, "1 request", "{n} requests"), count(a.sessions, "1 session", "{n} sessions")].join(" · "));
+    const cl = a.clients || [];
+    const meta = el("div", "ctx-who-sub", [...(cl.length ? [cl.slice(0, 3).join(", ") + (cl.length > 3 ? " +" + (cl.length - 3) : "")] : []), count(a.requests, "1 request", "{n} requests"), count(a.sessions, "1 session", "{n} sessions")].join(" · "));
+    if (cl.length) who.title = t("Requests whose User-Agent names only an HTTP library or an SDK, not an agent: {clients}", { clients: cl.join(", ") });
     const name = el("div", "ctx-who-box");
     name.append(who, meta);
     const [tone, word] = grade(a.score);
@@ -1255,7 +1117,7 @@
       const go = el("button", "text", t("Latest request"));
       go.type = "button";
       go.dataset.feature = "routing"; // it opens on the Routing page
-      go.onclick = () => window.openRoute(a.latestId, a.latestTime, { context: true }).catch((e) => status(e.message, "err"));
+      go.onclick = () => window.openRoute(a.latestId, a.latestTime, { context: true }).catch(statusErr);
       foot.append(go);
     }
     card.append(head, scores, tags, facts, mix, foot);
@@ -1291,7 +1153,7 @@
         still: true, cache, place: "session",
         series: s.points,
         crumbs: [agentLabel(s.agent), s.title || s.key.slice(0, 12), t("latest request")],
-        onPoint: (pt) => { if (!featuresOff.has("routing")) window.openRoute(pt.id, pt.time, { context: true }).catch((e) => status(e.message, "err")); },
+        onPoint: (pt) => { if (!featuresOff.has("routing")) window.openRoute(pt.id, pt.time, { context: true }).catch(statusErr); },
       }));
     }
     return box;
@@ -1422,7 +1284,11 @@
     const same = String(cur) === String(best);
     const saves = r.cost > 0 ? (r.cost - r.low) / r.cost : 0;
     const set = a.setting || {};
-    const applied = set.ours && String(set.value) === String(best);
+    // a model's own Compact at is where Codex runs, over Long conversations
+    // (hoobnn on Discord: "In use" for 170K beside "Now 430K")
+    const own = a.own;
+    const held = !!(set.locked || own);
+    const applied = !own && set.ours && String(set.value) === String(best);
     const row = el("div", "ctx-tune-row" + (same || applied ? " done" : ""));
 
     const title = el("div", "ctx-tune-title");
@@ -1481,6 +1347,8 @@
       why.textContent = t("{quick} of your calls came within 5 minutes of the one before, {pause} after a pause of 5 to 60 minutes.", { quick: pct(f.quick || 0), pause: pct(f.pause || 0) });
     }
     row.append(why);
+    // one with its own Compact at, which Use doesn't move (hoobnn)
+    for (const m of a.apart || []) row.append(el("p", "ctx-tune-caveat ctx-tune-apart", t("{model} compacts at its own {value}, which this doesn't move", { model: m.model, value: fmtK(m.value) })));
     // a window advised is weighed by tokens alone: what a compaction loses of
     // the task isn't measured, and a smaller one compacts more often (#1854)
     if (a.compact && (!same || lean)) row.append(el("p", "ctx-tune-caveat", timed
@@ -1488,29 +1356,32 @@
       : t("A token estimate only: it doesn't measure how well the agent keeps the task after a compaction. The lower the window, the more often it compacts.")));
 
     const foot = el("div", "ctx-tune-foot");
+    // the advice magpie put in is "In use" in every range, Now at it too
+    // (hoobnn: over 7 and 30 days it read "Already the leanest")
     const verdict = !lean && (same || applied)
       ? el("span", "ctx-chip good", "")
       : el("span", "ctx-chip info", "");
     verdict.append(el("i"), lean ? t("Not the leanest: {range} spends the fewest tokens", { range: bandName })
-      : same ? t("Already the leanest for how you work") : applied ? t("In use") : t("{pct} fewer tokens · {tokens} over the range", { pct: pct(saves), tokens: fmtK(Math.round(r.cost - r.low)) }));
+      : applied ? t("In use") : same ? t("Already the leanest for how you work") : t("{pct} fewer tokens · {tokens} over the range", { pct: pct(saves), tokens: fmtK(Math.round(r.cost - r.low)) }));
     foot.append(verdict, el("span", "grow"));
     const note = el("div", "ctx-tune-src");
     title.after(note);
     if (set.locked) note.textContent = t("{name} is set and comes first", { name: set.locked });
+    else if (own) note.textContent = t("{model} compacts at its own {value}, which comes first", { model: own.model, value: fmtK(own.value) });
     else if (set.source == "long") note.textContent = t("Long conversations, shared by Codex, Claude Code and Grok Build");
     else if (set.ours) note.textContent = t("Set by magpie");
     else if (set.value && a.compact && +set.value > a.compact.window && a.compact.window) note.textContent = t("You set {value}; the model's {window} comes first", { value: show(set.value), window: fmtK(a.compact.window) });
     else if (set.value) note.textContent = t("You set {value}", { value: show(set.value) });
     else note.textContent = t("The agent's default");
     const key = [agent, a.knob, a.model || ""].join("\x00");
-    const send = async (path, value) => {
+    const send = async (path, value, knob = a.knob) => {
       tuneBusy = key;
       renderContext();
       try {
-        await api("tune/" + path, { agent, knob: a.knob, model: a.model || "", value: String(value ?? "") });
+        await api("tune/" + path, { agent, knob, model: a.model || "", value: String(value ?? "") });
         status(path === "apply" ? t("Saved: {agent} reads it from its next session", { agent: agentLabel(agent) }) : t("Put back"), "ok");
       } catch (e) {
-        status(e.message, "err");
+        statusErr(e);
       }
       tuneBusy = "";
       await loadTune(true);
@@ -1522,7 +1393,7 @@
       undo.onclick = () => send("undo");
       foot.append(undo);
     }
-    if (!same && !applied && !set.locked) {
+    if (!same && !applied && !held) {
       const go = el("button", "text primary", t("Use {value}", { value: show(best) }));
       go.type = "button";
       go.disabled = tuneBusy === key;
@@ -1530,7 +1401,7 @@
       go.onclick = () => send("apply", best);
       foot.append(go);
     }
-    if (lean && !set.locked) {
+    if (lean && !held) {
       const go = el("button", "text primary", t("Use {value}", { value: show(lean.value) }));
       go.type = "button";
       go.disabled = tuneBusy === key;
@@ -1541,9 +1412,11 @@
       foot.append(go);
     }
     // a window of the reader's own (#1860), from the same replay: each
-    // value's tokens past the leanest and compactions, both estimates
+    // value's tokens against the setting now, which the reader picks away
+    // from (hayden4608 on Discord: against the leanest, every line read as
+    // more), and compactions, both estimates
     const pts = (a.compact && a.compact.curve) || [];
-    if (pts.length > 1 && !set.locked) {
+    if (pts.length > 1 && !held) {
       const other = el("button", "text ctx-tune-pick", t("Other window…"));
       other.type = "button";
       other.disabled = tuneBusy === key;
@@ -1551,27 +1424,46 @@
       other.setAttribute("aria-expanded", "false");
       other.onclick = (e) => {
         e.stopPropagation();
-        // timed, the advice may spend over the cheapest to wait no
-        // longer, so each value is said against the cheapest
+        // the fewest tokens: timed, the advice may spend over the cheapest
+        // to wait no longer, so the cheapest
         const cheapest = pts.reduce((x, p) => p.cost < x.cost ? p : x, pts[0]);
-        const base = timed ? cheapest.cost : (pts.find((p) => p.value === best) || {}).cost ?? r.low;
+        const fewest = timed ? cheapest.value : best;
         const now = set.ours && set.value != null ? +set.value : cur;
         const near = pts.reduce((x, p) => Math.abs(p.value - now) < Math.abs(x.value - now) ? p : x, pts[0]);
+        // the setting now's cost: its own point, else the replay's at it
+        const base = near.value === now ? near.cost : r.cost > 0 ? r.cost : near.cost;
         const opts = pts.map((p) => {
-          const extra = Math.max(0, p.cost - base);
-          const spend = p.value === (timed ? cheapest.value : best) ? t("Fewest tokens")
-            : base > 0 && extra / base < 0.005 ? t("As few tokens")
-            : t("+{tokens} tokens (+{pct})", { tokens: fmtK(extra), pct: pct(base > 0 ? extra / base : 0) });
+          const diff = p.cost - base, share = base > 0 ? Math.abs(diff) / base : 0;
+          const spend = p.value === now ? t("Your setting now")
+            : share < 0.005 ? t("As few tokens")
+            : diff < 0 ? t("−{tokens} tokens (−{pct})", { tokens: fmtK(-diff), pct: pct(share) })
+            : t("+{tokens} tokens (+{pct})", { tokens: fmtK(diff), pct: pct(share) });
           const often = p.compacts == null ? "" : p.compacts ? count(p.compacts, "about 1 compaction", "about {n} compactions") : t("no compaction");
           const wait = timed && p.compacts ? t("about {d} waiting", { d: fmtDur(p.wait || 0) }) : "";
-          return { v: String(p.value), name: show(p.value), literalName: true, note: [spend, often, wait].filter(Boolean).join(" · ") };
+          return { v: String(p.value), name: show(p.value), literalName: true, note: [spend, p.value === fewest ? t("Fewest tokens") : "", often, wait].filter(Boolean).join(" · ") };
         });
         openProtoMenu(other, opts, String(near.value), (v) => {
           if (v !== String(now)) send("apply", v);
-        }, "Compact at · estimated from your calls of the range", "ctx-tune-menu");
+        }, "Compact at · against the setting now, from your calls of the range", "ctx-tune-menu");
       };
       foot.append(other);
     }
+    // Codex's background compaction at the advice, the limit kept (herman_hong)
+    const as = a.async, aset = as?.setting || {}, cav = (s) => row.append(el("p", "ctx-tune-caveat ctx-tune-async", s));
+    const btn = (label, go, c = "") => {
+      const b = el("button", "text" + c, label);
+      b.type = "button";
+      b.disabled = tuneBusy === key;
+      b.onclick = go;
+      return foot.appendChild(b);
+    };
+    if (!as) {} else if (aset.locked) cav(t("Background compaction: Codex's config.toml sets {key}, which comes first", { key: aset.locked }));
+    else if (as.held?.length) cav(codexHeld(as.held));
+    else if (aset.ours && +aset.value === as.percent) {
+      verdict.after(el("span", "ctx-chip good ctx-tune-async", t("In the background at {value}", { value: fmtK(as.value) })));
+      verdict.nextSibling.prepend(el("i"));
+      btn(t("Undo background"), () => send("undo", "", "async_compact"));
+    } else btn(t("Use {value} in the background", { value: fmtK(as.value) }), () => send("apply", as.percent, "async_compact"), " ctx-tune-async").dataset.tt = t("Codex compacts in the background past {pct} of the model's window, about {value} of {window}, while the turn goes on; {now} stays as the foreground limit, for when the background one isn't ready. A Codex feature still under development, 0.163 or later.", { pct: as.percent + "%", value: fmtK(as.value), window: fmtK(as.window), now: show(cur) });
     row.append(foot);
     return row;
   }
@@ -1677,7 +1569,7 @@
     if (tuneData && tuneData.days !== +days) tuneData = null;
     if (ctxData && ctxData.days !== +days) ctxData = null;
     if (!ctxData && (ctxWaiting !== days || !$("#contextPane")?.childElementCount)) { ctxWaiting = days; renderContext(); }
-    loadTune().catch((e) => status(e.message, "err"));
+    loadTune().catch(statusErr);
     const data = await api("context?days=" + days);
     if (read !== ctxRead) return;
     // the auto refresh redraws only what changed: the same answer keeps the

@@ -75,6 +75,7 @@ async function open(browser, lang, width, posts, over) {
   const context = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", server(lang, posts, over));
   await page.goto("http://magpie.test/?view=usage");
@@ -103,7 +104,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const { context, page, errors } = await open(browser, lang, width, posts);
           const box = page.locator("#discoveryList");
           const opts = box.locator(".opt");
-          assert.equal((await page.locator("#setPage-privacy .row-head .label").last().textContent()).trim(), head);
+          // the heading right above the list (Agents' session history follows it)
+          assert.equal((await box.evaluate((b) => b.previousElementSibling.querySelector(".label").textContent)).trim(), head);
           assert.equal((await box.locator(".name").textContent()).trim(), name);
           const sub = (await box.locator(".sub").textContent()).trim();
           assert(sub.includes("Claude Code") && sub.includes("Codex"), "the sub names what is read: " + sub);

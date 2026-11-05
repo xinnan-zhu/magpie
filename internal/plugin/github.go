@@ -45,10 +45,16 @@ type Tagged struct {
 	// it as, its version, and whether it is gateway middleware or an agent
 	Package string `json:"package,omitempty"`
 	Version string `json:"version,omitempty"`
-	Kind    string `json:"kind,omitempty"` // "middleware", "agent" or "page" when that is all it is
+	Kind    string `json:"kind,omitempty"` // "agent" when it adds an agent (a module of its own too or not); "middleware", "page" or "hooks" when that is all it is
 	// its package.json's magpie.icon, as an installed plugin gives its
 	// provider one: an https URL or a data:image URI, as it is written
 	Icon string `json:"icon,omitempty"`
+	// Name and Summary are what its own package.json says it is
+	// (magpie.name, magpie.summary): its card shows them as the package's
+	// own words, never as reviewed, and they never resolve a name (#3608).
+	// npm's copy says them when the card installs from npm.
+	Name    string            `json:"name,omitempty"`
+	Summary map[string]string `json:"summary,omitempty"`
 }
 
 // Where GitHub is asked, moved by tests.
@@ -61,7 +67,8 @@ var (
 // tagged a moment ago shows within minutes (lee04052822 on X tagged theirs
 // and, asked six hours apart, didn't see it). A search is one request of
 // the ten a minute; what each repository's package.json and npm said is
-// kept while its last push stays the same, so asking again costs no more.
+// kept while its last push stays the same (but see rawFresh), so asking
+// again costs no more.
 const taggedTTL = 10 * time.Minute
 
 // taggedSearch bounds each page of GitHub's search: from mainland China
@@ -83,6 +90,14 @@ var (
 	// taggedPage is how many repositories one page of the search holds
 	// (GitHub's most is 100)
 	taggedPage = 100
+	// rawFresh is how long after a push raw.githubusercontent.com may
+	// still answer from before it: its answers, a 404 too, say they
+	// stand five minutes, so a file pushed a moment ago (the package.json,
+	// the file it names) can read as missing, or as it was (MengXiangxi
+	// on #3821, #4067). What a read that soon after the push made of a
+	// repository is shown, as any read's is, and it is read again at the
+	// next ask.
+	rawFresh = 10 * time.Minute
 )
 
 var (
@@ -97,6 +112,8 @@ var (
 	// when it was left out
 	readMu   sync.Mutex
 	readRepo = map[string]*Tagged{}
+	// readRepo's keys read less than rawFresh after the push
+	readSoon = map[string]bool{}
 )
 
 func taggedCache() string { return filepath.Join(filepath.Dir(marketCache()), "plugin-github.json") }
@@ -206,9 +223,10 @@ func TaggedAskAgain() {
 }
 
 // askTagged asks GitHub's search, and reads each repository it names
-// that wasn't read at its last push. whole is false when a repository was
-// left out for want of an answer in taggedWait: it is then as last had
-// it, if it had it, and missing counts those last didn't have.
+// that wasn't read at its last push, or was read less than rawFresh after
+// it. whole is false when a repository was left out for want of an answer
+// in taggedWait: it is then as last had it, if it had it, and missing
+// counts those last didn't have.
 func askTagged(ctx context.Context, last []Tagged) (l []Tagged, whole bool, missing *TaggedMissing, err error) {
 	type item struct {
 		FullName      string    `json:"full_name"`
@@ -302,13 +320,16 @@ func askTagged(ctx context.Context, last []Tagged) (l []Tagged, whole bool, miss
 		seen[key] = true
 		readMu.Lock()
 		was, read := readRepo[key]
+		soon := readSoon[key]
 		readMu.Unlock()
 		if read {
 			if was != nil {
 				out[i], keep[i] = fresh(*was, t), true
 			}
 			done[i] = true
-			continue
+			if !soon {
+				continue
+			}
 		}
 		wg.Add(1)
 		go func(i int, t Tagged, branch string) {
@@ -325,10 +346,12 @@ func askTagged(ctx context.Context, last []Tagged) (l []Tagged, whole bool, miss
 				} else {
 					readRepo[key] = nil
 				}
+				readSoon[key] = time.Since(it.Pushed) < rawFresh
 				readMu.Unlock()
 			}
 			mu.Lock()
-			if !late {
+			// read again and not answered: as it was read before
+			if !late && (ok || read || !done[i]) {
 				out[i], keep[i] = got, ok
 				// a package.json GitHub didn't answer for: not known
 				done[i] = ok || read
@@ -353,6 +376,7 @@ func askTagged(ctx context.Context, last []Tagged) (l []Tagged, whole bool, miss
 	for k := range readRepo {
 		if !seen[k] {
 			delete(readRepo, k)
+			delete(readSoon, k)
 		}
 	}
 	readMu.Unlock()
@@ -407,8 +431,12 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 		Magpie  struct {
 			Middleware string `json:"middleware"`
 			Agent      string `json:"agent"`
+			Hooks      string `json:"hooks"`
 			Icon       string `json:"icon"`
-			Page       struct {
+			Name       string `json:"name"`
+			// a map of language to sentence, anything else read as none
+			Summary json.RawMessage `json:"summary"`
+			Page    struct {
 				File string `json:"file"`
 			} `json:"page"`
 		} `json:"magpie"`
@@ -428,20 +456,31 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 	// a picture, as host.js's iconOf takes one: magpie checks and
 	// keeps it before the page shows it (the GUI's /api/plugins/github)
 	t.Icon = ownIcon(pj.Magpie.Icon)
-	if pj.Main == "" && len(pj.Exports) == 0 {
-		switch {
-		case strings.TrimSpace(pj.Magpie.Middleware) != "":
-			t.Kind = "middleware"
-		case strings.TrimSpace(pj.Magpie.Agent) != "":
-			t.Kind = "agent"
-		case strings.TrimSpace(pj.Magpie.Page.File) != "":
-			t.Kind = "page"
-		}
+	// and what it says of itself, shown on its card as its own words
+	// rather than the community's (#3608)
+	t.Name, t.Summary = ownName(pj.Magpie.Name), ownSummary(pj.Magpie.Summary)
+	// runs is whether Bun loads a module of its own (main, exports)
+	runs := pj.Main != "" || len(pj.Exports) > 0
+	switch {
+	case !runs && strings.TrimSpace(pj.Magpie.Middleware) != "":
+		t.Kind = "middleware"
+	// a package that adds an agent is an agent plugin, its Bun module
+	// (main) only what keeps the agent working, not a provider
+	// (plugins#737)
+	case strings.TrimSpace(pj.Magpie.Agent) != "":
+		t.Kind = "agent"
+	case !runs && strings.TrimSpace(pj.Magpie.Page.File) != "":
+		t.Kind = "page"
+	// gateway hooks alone (magpie.hooks) need no entry of their
+	// own, as the host loads them: the hooks file is the one to
+	// find (#3821)
+	case !runs && strings.TrimSpace(pj.Magpie.Hooks) != "":
+		t.Kind = "hooks"
 	}
 	// published to npm from this repository: npm's copy is the one
 	// built to be installed (a repository often leaves its dist out,
 	// built only to publish), so it is installed from npm
-	b, err := fetchJSON(pc, npmRegistry+"/"+npmPath(pj.Name)+"/latest", 1<<20)
+	b, err := fetchNPM(pc, pj.Name, "/"+npmPath(pj.Name)+"/latest", 1<<20)
 	known := err == nil || errors.Is(err, errNotFound)
 	var unknown error
 	if !known {
@@ -454,6 +493,14 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 		var l npmLatest
 		if json.Unmarshal(b, &l) == nil && l.Version != "" && strings.EqualFold(githubRepo(repoURL(l.Repository)), t.Repo) {
 			t.Spec, t.Version = pj.Name, l.Version
+			// the copy installed says what it is: its words when it
+			// says any, else the repository's
+			if n := ownName(l.Magpie.Name); n != "" {
+				t.Name = n
+			}
+			if s := ownSummary(l.Magpie.Summary); s != nil {
+				t.Summary = s
+			}
 			npmNames = l.Main != "" || len(l.Exports) > 0
 		}
 	}
@@ -466,15 +513,22 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 	// that is only a command (bin), an MCP server, has none and
 	// would never load (#1327)
 	if IsGit(t.Spec) || !npmNames {
-		entry := pj.Magpie.Middleware
-		if t.Kind == "agent" {
-			entry = pj.Magpie.Agent
-		} else if t.Kind == "page" {
-			entry = pj.Magpie.Page.File
-		} else if t.Kind != "middleware" {
-			entry = pkgEntry(pj.Exports, pj.Main)
-			if !IsGit(t.Spec) {
-				entry = pkgEntry(nil, "")
+		// a package with a module of its own loads that module, an
+		// agent plugin's too; else the one file it declares
+		entry := pkgEntry(pj.Exports, pj.Main)
+		if !IsGit(t.Spec) {
+			entry = pkgEntry(nil, "")
+		}
+		if !runs {
+			switch t.Kind {
+			case "middleware":
+				entry = pj.Magpie.Middleware
+			case "agent":
+				entry = pj.Magpie.Agent
+			case "page":
+				entry = pj.Magpie.Page.File
+			case "hooks":
+				entry = pj.Magpie.Hooks
 			}
 		}
 		if path.Ext(entry) != "" {

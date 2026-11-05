@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
@@ -43,14 +42,9 @@ func isReviewCall(kind, asked string) bool {
 }
 
 // freeOnChatGPT says whether a call on model by a ChatGPT account on plan
-// is free, counted in none of its usage windows: Codex's reviewer model,
-// codex-auto-review, since OpenAI made Auto-review free for ChatGPT
-// sign-ins on 2026-10-06 (#1593, hywang1230), but not on a Free plan,
-// where cybercaius on Discord measured it spending the allowance. A review
-// run on another model, or through an API key, is counted as any call.
-func freeOnChatGPT(model, plan string) bool {
-	return strings.EqualFold(strings.TrimSpace(model), "codex-auto-review") && !strings.EqualFold(strings.TrimSpace(plan), "free")
-}
+// is free (provider.ChatGPTReviewFree, which the Usage page's prices
+// follow too).
+func freeOnChatGPT(model, plan string) bool { return provider.ChatGPTReviewFree(model, plan) }
 
 // codexMemoryStandIn is the model a Codex memory call goes to when magpie
 // knows none by the name it came with (#742): Codex writes and
@@ -80,7 +74,24 @@ func (s *Server) codexMemoryStandIn(r *http.Request, who, agent, kind, asked str
 		return ""
 	}
 	if _, _, ok := provider.Resolve(asked); ok {
-		return ""
+		// A memory call on one of Codex's own bare defaults that a
+		// provider of magpie's happens to serve under the same name:
+		// the name is Codex's own, not a pick of that provider's model,
+		// and the account it resolves to may refuse the model outright
+		// (400, three tries, the memory lost, #4765). With Codex's
+		// config naming no model for its memories, the call follows the
+		// conversation's, as it does on the ChatGPT backend's path
+		// (codexFollowTo). "" keeps it where the name resolves: any
+		// other call, the config's own pick, a call whose config magpie
+		// can't read, or no conversation of magpie's to follow.
+		if !isMemoryKind(kind) || CodexSideSet == nil || CodexSideSet("memories") {
+			return ""
+		}
+		to := s.codexMemorySession(r, body)
+		if to == "" || to == asked {
+			return ""
+		}
+		return to
 	}
 	if isMemoryKind(kind) {
 		if m := s.codexLeads.sideOf(r, body, true); m != "" && m != asked {

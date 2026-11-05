@@ -72,15 +72,15 @@ func (c *rowChunk) encode(keep func([]byte) bool) ([]byte, []*time.Location) {
 	locs := map[*time.Location]uint64{}
 	for k := range c.Rows {
 		p := &c.Rows[k]
-		loc := p.Time.Location()
+		loc := p.Time().Location()
 		id, ok := locs[loc]
 		if !ok {
 			id = uint64(len(locations))
 			locs[loc] = id
 			locations = append(locations, loc)
 		}
-		put(uint64(p.Time.Unix()))
-		put(uint64(p.Time.Nanosecond()))
+		put(uint64(p.Time().Unix()))
+		put(uint64(p.Time().Nanosecond()))
 		put(id)
 		put(uint64(p.Shape))
 		for _, n := range p.Varied {
@@ -89,7 +89,7 @@ func (c *rowChunk) encode(keep func([]byte) bool) ([]byte, []*time.Location) {
 		for _, n := range p.Tokens {
 			put(uint64(n))
 		}
-		for _, n := range []int64{p.Millis, p.TTFT, p.FirstText, p.Order, p.RouteID, p.Sent, p.Flow, p.Own, p.Retried, p.Queued, p.FirstReasoning} {
+		for _, n := range []int64{int64(p.Millis), int64(p.TTFT), int64(p.FirstText), p.Order, p.RouteID, int64(p.Sent), int64(p.Flow), int64(p.Own), int64(p.Retried), int64(p.Queued), int64(p.FirstReasoning)} {
 			put(uint64(n))
 		}
 		put(math.Float64bits(p.Cost))
@@ -150,20 +150,21 @@ func decodeMapped(m *diskMapping, dst, src []byte) (data []byte, ok bool) {
 // unpackInto is unpack decoding the rows into rows when it is large enough:
 // every field of a row is written, so a reused slice needs no clearing.
 func (c *rowChunk) unpackInto(into []packedRow) *rowChunk {
-	return c.unpackReusing(nil, into, nil, nil, nil)
+	return c.unpackReusing(nil, into, nil, nil, nil, false)
 }
 
 // unpackReusing is unpackInto decoding the strings' and shapes' slices into
 // strs and shapes too, when they are large enough: for a reader that lets
-// go of a chunk's rows before it opens the next (chunkRows). With lent, the
-// block is decoded into *lent and the strings are of it, not a copy: they
-// are good until *lent is decoded into again. The chunk is dst, when given.
-func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string, shapes [][rowTexts]uint32, lent *[]byte) *rowChunk {
+// go of a chunk's rows before it opens the next (chunkRows). The block is
+// decoded into *buf, when given. With lent, the strings are of *buf, not a
+// copy: they are good until *buf is decoded into again. The chunk is dst,
+// when given.
+func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string, shapes [][rowTexts]uint32, buf *[]byte, lent bool) *rowChunk {
 	if c == nil || len(c.Archive) == 0 {
 		return c
 	}
-	buf := lent
 	if buf == nil {
+		lent = false
 		buf = rowDecodes.Get().(*[]byte)
 		defer rowDecodes.Put(buf)
 	}
@@ -174,6 +175,13 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 	*buf = data
 	valid := true
 	take := func() uint64 {
+		// most of a row's numbers are under 128, one byte: Uvarint's loop
+		// for them was ~40% of a pass's decoding (#4372)
+		if len(data) > 0 && data[0] < 0x80 {
+			n := uint64(data[0])
+			data = data[1:]
+			return n
+		}
 		n, k := binary.Uvarint(data)
 		if k <= 0 {
 			valid = false
@@ -218,7 +226,7 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 		return nil
 	}
 	var text string
-	if lent != nil {
+	if lent {
 		text = unsafe.String(unsafe.SliceData(section), len(section)-len(data))
 	} else {
 		text = string(section[:len(section)-len(data)])
@@ -258,13 +266,18 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 		}
 	}
 	next.Bytes += int64(len(next.Shapes)) * int64(unsafe.Sizeof([rowTexts]uint32{}))
+	var few [4]uint16
+	zones := few[:0]
+	for _, loc := range c.Locations {
+		zones = append(zones, zoneOf(loc))
+	}
 	for i := range next.Rows {
 		p := &next.Rows[i]
 		sec, nano, loc := int64(take()), int64(take()), take()
-		if loc >= uint64(len(c.Locations)) {
+		if loc >= uint64(len(zones)) {
 			return nil
 		}
-		p.Time = time.Unix(sec, nano).In(c.Locations[loc])
+		p.setTimeIn(time.Unix(sec, nano), zones[loc])
 		p.Shape = uint32(take())
 		if int(p.Shape) >= len(next.Shapes) {
 			return nil
@@ -277,13 +290,13 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 			p.Varied[j] = uint32(n)
 		}
 		for j := range p.Tokens {
-			p.Tokens[j] = int64(take())
+			p.Tokens[j] = tokensOf(int64(take()))
 		}
-		p.Millis, p.TTFT, p.FirstText, p.Order = int64(take()), int64(take()), int64(take()), int64(take())
+		p.Millis, p.TTFT, p.FirstText, p.Order = msOf(int64(take())), msOf(int64(take())), msOf(int64(take())), int64(take())
 		p.RouteID = int64(take())
-		p.Sent, p.Flow = int64(take()), int64(take())
-		p.Own, p.Retried, p.Queued = int64(take()), int64(take()), int64(take())
-		p.FirstReasoning = int64(take())
+		p.Sent, p.Flow = msOf(int64(take())), msOf(int64(take()))
+		p.Own, p.Retried, p.Queued = msOf(int64(take())), msOf(int64(take())), msOf(int64(take()))
+		p.FirstReasoning = msOf(int64(take()))
 		p.Cost, p.Status, p.Flags = math.Float64frombits(take()), int32(take()), uint16(take())
 		p.Tries = int32(take())
 		p.Masking = int32(take())

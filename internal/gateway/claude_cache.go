@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash"
@@ -22,12 +23,31 @@ type clientCache struct {
 	messages        int
 	droppedSystem   int
 	droppedMessages int
+	systemMarks     int // the system's marks, as the request has them
 	fresh           bool
-	report          func()
+	// pasted: the run is Claude Code's interactive mode, which is pasted
+	// the words with none of their marks (claudetui's userPieces), and
+	// keeps its own prompt caching (startRun): every mark but the tools'
+	// is dropped
+	pasted bool
+	report func()
 }
 
 func wantsClientCache(r *http.Request, from provider.Protocol) bool {
 	return from == provider.Anthropic && r.Header.Get("X-Magpie-Cache-Marks") == "client"
+}
+
+// classifierClientCache reports whether a Messages body is Claude Code's
+// auto mode classifier carrying cache marks of its own. Desktop's
+// classifier marks its blocks but knows nothing of magpie's private header
+// (#3835): its marks are kept like an opted-in client's, validated as
+// theirs are. The bytes are looked at before the request is parsed, and
+// only a classifier-shaped body carrying a cache_control field is parsed
+// for its marks.
+func classifierClientCache(from provider.Protocol, body []byte) bool {
+	return from == provider.Anthropic &&
+		bytes.Contains(body, []byte("cache_control")) &&
+		autoModeClassifierAsk(body)
 }
 
 // selected reports the mapping as soon as run selection is known. Starting
@@ -37,6 +57,7 @@ func (c *clientCache) selected(fresh bool) {
 		return
 	}
 	c.fresh = fresh
+	c.pasted = claudeTUIOn()
 	if c.report != nil {
 		c.report()
 	}
@@ -97,6 +118,15 @@ func cacheMark(ttl string) map[string]string {
 	return map[string]string{"type": "ephemeral", "ttl": ttl}
 }
 
+// partMark is the mark of a client's own a rebuilt block keeps (#4571):
+// the ttl the parse read off the block, or none.
+func partMark(ttl string) map[string]string {
+	if ttl == "" {
+		return nil
+	}
+	return cacheMark(ttl)
+}
+
 func shorterTTL(a, b string) string {
 	if a == "" {
 		return b
@@ -152,6 +182,7 @@ func readClientCache(a aRequest) (*clientCache, error) {
 			return nil, err
 		}
 		if ttl != "" {
+			c.systemMarks++
 			prefix, _ := json.Marshal(system[:i+1])
 			end := len(stringOrText(prefix))
 			if end <= lastEnd {
@@ -224,12 +255,18 @@ func cacheDropped(w http.ResponseWriter, req *Request) {
 	if c.tools > 0 {
 		fields = append(fields, fmt.Sprintf("tools:%d", c.tools))
 	}
-	if c.droppedSystem > 0 {
-		fields = append(fields, fmt.Sprintf("system:%d", c.droppedSystem))
-	}
-	messages := c.messages
+	system, messages := c.droppedSystem, c.messages
 	if c.fresh {
 		messages = c.droppedMessages
+	}
+	if c.pasted {
+		system, messages = c.systemMarks, c.messages
+		if c.tail != "" {
+			messages++
+		}
+	}
+	if system > 0 {
+		fields = append(fields, fmt.Sprintf("system:%d", system))
 	}
 	if messages > 0 {
 		fields = append(fields, fmt.Sprintf("messages:%d", messages))

@@ -50,7 +50,7 @@ magpie.plugin("ssh", (ctx) => {
     const g = generation;
     busy = true; problem = ""; draw();
     try { await fn(g); }
-    catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
+    catch (e) { if (g === generation) { problem = errorMessage(e); } }
     finally { if (g === generation) { busy = false; draw(); } }
   }
   function action(label, fn, cls = "text action") {
@@ -80,7 +80,7 @@ magpie.plugin("ssh", (ctx) => {
   async function refreshAgents(g) {
     if (g !== generation) return;
     try { await readAgents(g); }
-    catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
+    catch (e) { if (g === generation) { problem = errorMessage(e); } }
     finally { if (g === generation) draw(); }
   }
   // a ready host's agents are read with it, as the Agents page lists them
@@ -349,9 +349,9 @@ magpie.plugin("ssh", (ctx) => {
       av.append(menu(f.options.map((o) => ({ v: o.value, name: o.label || o.value })), f.value, a.name, async (value) => {
         if (busy) return;
         const g = generation, bound = connection;
-        busy = true; draw();
+        busy = true; problem = ""; draw();
         try { const out = await api(endpoint("pick", bound), { agent: a.id, field: f.key, value }); if (g === generation) { agents = out.agents; if (out.notice) status(out.notice); } }
-        catch (e) { if (g === generation) { problem = errorMessage(e); status(problem, "err"); } }
+        catch (e) { if (g === generation) { problem = errorMessage(e); } }
         finally { if (g === generation) { busy = false; draw(); } }
       }));
     }

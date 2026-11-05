@@ -10,8 +10,11 @@ const ID = process.env.FAKE_ID || "fakeco"
 const born = Date.now()
 
 // fakeWho is who a team signs in as: team@fake, and a team named name/uid
-// is name@fake with that uid, as WorkBuddy's plugin keeps one
+// is name@fake with that uid, as WorkBuddy's plugin keeps one; a team
+// named =id is named by that id, its uid too, as the CodeArts plugin's
+// OfficeAce card names a new sign-in by the Huawei domain id (#4473)
 function fakeWho(team) {
+  if (team?.startsWith("=")) return { accountId: team.slice(1), uid: team.slice(1) }
   const [name, uid] = (team ?? "me").split("/")
   return uid ? { accountId: name + "@fake", uid } : { accountId: name + "@fake" }
 }
@@ -93,6 +96,33 @@ export const FakePlugin = async ({ client }) => ({
       cfg.provider[ID].models["sensenova-u1.5-lite"] = { name: "sensenova-u1.5-lite", limit: { context: 131072, output: 32768 } }
       cfg.provider[ID].models["flux-2"] = { name: "Flux 2", provider: { npm: "@ai-sdk/anthropic" }, limit: { context: 1000, output: 100 } }
     }
+    // $FAKE_LOOMY: iFlytek's Loomy gateway's three image generators as its
+    // /v1/models lists them (#4913), on the provider's openai-compatible;
+    // all three draw on its images API
+    if (process.env.FAKE_LOOMY) {
+      cfg.provider[ID].models["Hy-Image-3.5-preview"] = { name: "Hy-Image-3.5-preview", limit: { context: 131072, output: 32768 } }
+      cfg.provider[ID].models["doubao-seedream-5-lite"] = { name: "doubao-seedream-5-lite", limit: { context: 131072, output: 32768 } }
+      cfg.provider[ID].models["qwen-image-3.0-pro"] = { name: "qwen-image-3.0-pro", limit: { context: 131072, output: 32768 } }
+    }
+    // $FAKE_GOOGLE: the provider's models are on Gemini's API, as XYenon's
+    // Google AI Studio plugin gives them all (@ai-sdk/google), so it has
+    // no OpenAI-compatible model
+    if (process.env.FAKE_GOOGLE) cfg.provider[ID].npm = "@ai-sdk/google"
+    // $FAKE_VIDEO: a video model, as a Gemini plugin lists Veo: it says it
+    // gives video, nothing else
+    if (process.env.FAKE_VIDEO) cfg.provider[ID].models["veo-3.1-generate-preview"] = { name: "Veo 3.1", modalities: { input: ["text", "image"], output: ["video"] }, limit: { context: 1000, output: 100 } }
+    // $FAKE_GEMINI_DRAWS: image models on Gemini's API, as XYenon's Google
+    // AI Studio plugin lists them: one named for images, one that only
+    // says it gives them, and an Imagen, which draws on :predict instead
+    if (process.env.FAKE_GEMINI_DRAWS) {
+      const g = { provider: { npm: "@ai-sdk/google" }, limit: { context: 3000, output: 300 } }
+      cfg.provider[ID].models["gemini-3-pro-image-preview"] = { ...g, name: "Nano Banana Pro", modalities: { input: ["text", "image"], output: ["text", "image"] } }
+      cfg.provider[ID].models["gemini-3-flash-canvas"] = { ...g, name: "Gemini 3 Flash Canvas", modalities: { input: ["text", "image"], output: ["text", "image"] } }
+      cfg.provider[ID].models["imagen-4.0-generate-001"] = { ...g, name: "Imagen 4", modalities: { input: ["text"], output: ["image"] } }
+    }
+    // $FAKE_SEES: a model on the provider's openai-compatible that takes
+    // images, as WorkBuddy's plugin serves its models
+    if (process.env.FAKE_SEES) cfg.provider[ID].models["fake-sees"] = { name: "Fake Sees", modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1000, output: 100 } }
     // $FAKE_DEEPSEEK: a DeepSeek model, as Cline's cline-pass/deepseek-v4-pro
     if (process.env.FAKE_DEEPSEEK) cfg.provider[ID].models["deepseek-v4-pro"] = { name: "DeepSeek V4 Pro", limit: { context: 1000, output: 100 } }
     // $FAKE_GLM: a GLM model, as Cline's cline-pass/glm-5.3
@@ -144,6 +174,12 @@ export const FakePlugin = async ({ client }) => ({
       cfg.provider[ID].models["fake-on"] = { name: "Fake On", reasoning: true, variants: levels(["low", "high", "max"]), limit: { context: 1000, output: 100 } }
       // Trae's levels as Our Free Model's plugin lists them (nianshou5)
       cfg.provider[ID].models["fake-trae"] = { name: "Fake Trae", reasoning: true, variants: levels(["light", "high", "extra_high"]), limit: { context: 1000, output: 100 } }
+    }
+    // $FAKE_TEMP: a model whose vendor turns temperature and top_p away,
+    // said as Factory 0.1.31's config models say it of its OpenAI route
+    // (plugins#154); fake-1 beside it says nothing and takes them
+    if (process.env.FAKE_TEMP) {
+      cfg.provider[ID].models["fake-cold"] = { name: "Fake Cold", temperature: false, limit: { context: 1000, output: 100 } }
     }
     // $FAKE_ZEN: a model as opencode-zen-free 0.1.3's config hook writes
     // it, from models.opencode.ai on 2026-10-11 (#1595, tkhs101): it
@@ -210,7 +246,7 @@ export const FakePlugin = async ({ client }) => ({
         // where magpie said the agent works, as the plugin read it; its own
         // headers go on too, as a plugin that sends on what it got sends
         // them, for the host to take off
-        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
         // $FAKE_QUEUE: that model is queued at the vendor, as Qoder's free
         // models are: waited out (here until magpie gives up) unless magpie
         // said it needn't be, then said at once with the queue's 503
@@ -257,15 +293,17 @@ export const FakePlugin = async ({ client }) => ({
       // $FAKE_WINDOWS: a JSON file of each account's windows, read at
       // each reading, as a vendor's usage page says them now (Factory's
       // plugin with Standard usage only, plugins#349)
+      // an IAM id kept as the accountId, the phone told here (#4416)
+      const iam = a.accountId?.startsWith("iam::") ? "180****2361" : undefined
       if (process.env.FAKE_WINDOWS) {
         const fs = await import("node:fs")
         const ws = JSON.parse(fs.readFileSync(process.env.FAKE_WINDOWS, "utf8"))[a.accountId]
-        if (ws) return { plan: "Fake Pro", windows: ws }
+        if (ws) return { plan: "Fake Pro", windows: ws, user: iam }
       }
       const full = a.accountId === "full@fake"
       return {
         plan: "Fake Pro",
-        user: full ? "Full@Fake.example" : undefined,
+        user: full ? "Full@Fake.example" : iam,
         until: "2030-01-02T03:04:05Z",
         renew: "auto",
         resets: full ? { count: 3, byWindow: true, fiveHour: 2, weekly: 1, team: true, each: [{ window: "weekly" }, { until: "2031-01-02T00:00:00Z", window: "fiveHour" }, { until: 1924992000, window: "fiveHour" }] } : undefined,
@@ -332,6 +370,14 @@ export const FakePlugin = async ({ client }) => ({
       // the vendor unreachable: the list kept, as Zed's plugin keeps it
       if (auth?.refresh === "r-unreachable") await fetch("http://127.0.0.1:9/models").catch(() => {})
       if (auth?.type === "oauth" && auth.refresh?.startsWith("rot-")) {
+        // $FAKE_MODELS_HOLD: say the hook came ($FAKE_MODELS_HOLD.in), and
+        // spend the token only once that file is there
+        const hold = process.env.FAKE_MODELS_HOLD
+        if (hold) {
+          const fs = await import("node:fs")
+          fs.writeFileSync(hold + ".in", "")
+          while (!fs.existsSync(hold)) await new Promise((r) => setTimeout(r, 10))
+        }
         await client.auth.set({ path: { id: ID }, body: { ...auth, refresh: auth.refresh + "+" } })
       }
       // fake-1 costs the plan nothing, as a WorkBuddy model of x0.00
@@ -348,6 +394,25 @@ export const FakePlugin = async ({ client }) => ({
       if (process.env.FAKE_ZEN) {
         p.models["mimo-v2.6-flash-free"] = { ...p.models["fake-1"], id: "mimo-v2.6-flash-free", name: "MiMo V2.6 Flash Free", api: { ...p.models["fake-1"].api, id: "mimo-v2.6-flash-free" }, free: true, variants: {},
           capabilities: {"temperature":true,"reasoning":true,"attachment":true,"toolcall":true,"input":{"text":true,"image":true,"audio":true,"video":true,"pdf":false},"output":{"text":true,"image":false,"audio":false,"video":false,"pdf":false},"interleaved":{"field":"reasoning_content"}} }
+        // a model as Command Code's plugin lists its plan's (#4436): it
+        // says what the model takes (text; audio, video, pdf no) and says
+        // nothing of images (m.images not a boolean there)
+        p.models["cc-plan-1"] = { ...p.models["fake-1"], id: "cc-plan-1", name: "CC Plan 1", api: { ...p.models["fake-1"].api, id: "cc-plan-1" }, free: true,
+          capabilities: {"temperature":true,"reasoning":true,"toolcall":true,"input":{"text":true,"audio":false,"video":false,"pdf":false},"output":{"text":true}} }
+      }
+      // $FAKE_KINDS: models as XYenon's magpie-google-ai-studio lists them
+      // (#3279): the embedding as the report gives it (output text false,
+      // nothing else said), one not named an embedding, a TTS with its
+      // parseModels' outputs (audio alone), a model that talks and speaks,
+      // one that talks and draws
+      if (process.env.FAKE_KINDS) {
+        const as = (id, output) => ({ ...p.models["fake-1"], id, name: id, api: { ...p.models["fake-1"].api, id }, free: false,
+          capabilities: { ...p.models["fake-1"].capabilities, input: { text: true }, output } })
+        p.models["gemini-embedding-001"] = as("gemini-embedding-001", { text: false })
+        p.models["bge-m3"] = as("bge-m3", { text: false })
+        p.models["gemini-2.5-flash-preview-tts"] = as("gemini-2.5-flash-preview-tts", { text: false, image: false, audio: true, video: false, pdf: false })
+        p.models["gemini-2.5-flash-native-audio"] = as("gemini-2.5-flash-native-audio", { text: true, image: false, audio: true, video: false, pdf: false })
+        p.models["gemini-2.5-flash-image"] = as("gemini-2.5-flash-image", { text: true, image: true, audio: false, video: false, pdf: false })
       }
       // $FAKE_SEARCHER: one more model, that searches the web by itself
       // when asked in plain words, marked on the list the hook gives, as

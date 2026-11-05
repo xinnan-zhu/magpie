@@ -159,7 +159,7 @@ func openClawWant(raw gjson.Result) []any {
 		}
 	}
 	out := []any{}
-	for _, m := range magpieModels("openclaw") {
+	for _, m := range sharedModels("openclaw") {
 		ctx := m.Context
 		if ctx <= 0 {
 			ctx = openClawContext
@@ -389,7 +389,7 @@ func openClawAt(at place) *Agent {
 		}
 		c := gjson.ParseBytes(s)
 		var was openClawWas
-		if b := stashLoad()[keyWas]; b != "" {
+		if b := stashShared()[keyWas]; b != "" {
 			json.Unmarshal([]byte(b), &was)
 		} else if !ours(c) {
 			m := c.Get(openClawModel)
@@ -416,7 +416,8 @@ func openClawAt(at place) *Agent {
 	return atomic(&Agent{
 		ID: "openclaw", Name: "OpenClaw", Icon: "openclaw", Spelled: prefixed, NoNames: true,
 		Bin: "openclaw", Dir: dir, Path: path,
-		Notice: func() string { return noticeOpenClaw.String() },
+		Notice:   func() string { return noticeOpenClaw.String() },
+		ListOnly: true,
 		Sync: func() error {
 			s, err := openClawRead(path)
 			if err != nil {
@@ -477,7 +478,7 @@ func openClawAt(at place) *Agent {
 				return patch([]edit.KV{{Path: openClawModel, Value: v}}, nil)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(openClawOwn(keyWas, cur["model"]), viaMagpie("openclaw", magpieID+"/")...)
+				return withVia(openClawOwn(keyWas, cur["model"]), "openclaw", magpieID+"/")
 			},
 		}},
 	}, path)
@@ -488,7 +489,7 @@ func openClawAt(at place) *Agent {
 // which magpie can't list.
 func openClawOwn(keyWas, cur string) []Option {
 	var was openClawWas
-	json.Unmarshal([]byte(stashLoad()[keyWas]), &was)
+	json.Unmarshal([]byte(stashShared()[keyWas]), &was)
 	var out []Option
 	for _, m := range []string{openClawPrimary(gjson.ParseBytes(was.Model)), cur} {
 		if m == "" || prefixed(m) || slices.ContainsFunc(out, func(o Option) bool { return o.Value == m }) {

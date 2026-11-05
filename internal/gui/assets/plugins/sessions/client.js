@@ -60,6 +60,10 @@ magpie.plugin("sessions", (ctx) => {
   let fitObserver = null;
   let focus = null;           // { agent, id, until }: a session to bring into sight once drawn
   let recordingBusy = false;
+  // the agents picked in the consent (RustCats on X), by id, and whether
+  // the choice is being saved
+  const consentPicked = new Set();
+  let consentBusy = false;
   // An open folder draws its latest SM_PAGE sessions and a "Show N more"
   // that adds the next page where it is (ChildhoodAndy on X: with thousands
   // of sessions, switching to the page or to another agent, a keystroke in
@@ -355,6 +359,84 @@ magpie.plugin("sessions", (ctx) => {
     return card;
   }
 
+  // The consent (RustCats on X: a new install showed every agent's history
+  // before anyone agreed to it). Until the reader says which agents'
+  // sessions magpie may read (data.reads.asked), it reads none of them and
+  // this card comes first: the agents found here, each with its own
+  // switch, off; Allow selected reads those picked, and Allow all every
+  // agent, those found later too. Settings › Privacy changes it later.
+  // In gateway mode no agent's files here are read (reads.gateway), so
+  // there is nothing to ask.
+  const consentApplies = () => data?.reads && data.reads.asked === false && !data.reads.gateway;
+
+  function consentCard() {
+    const found = data.reads.found || [];
+    const card = el("div", "sm-consent");
+    const title = el("b", "sm-consent-title", t("Show your agents' sessions?"));
+    title.id = "smConsentTitle";
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-labelledby", title.id);
+    card.append(title, el("p", "sm-consent-sub", t("magpie reads no agent's session history until you allow it. Pick the agents whose sessions this page may show; what magpie's gateway served is counted either way. You can change this in Settings › Privacy.")));
+    if (found.length) {
+      const list = el("div", "list sm-consent-list");
+      for (const x of found) {
+        const on = consentPicked.has(x.agent);
+        const row = el("div", "row sm-consent-row");
+        const name = el("span", "sm-consent-name", x.name);
+        name.id = "smConsent-" + x.agent;
+        const sw = el("button", "lib-switch" + (on ? " on" : ""));
+        sw.type = "button";
+        sw.setAttribute("role", "switch");
+        sw.setAttribute("aria-checked", String(on));
+        sw.setAttribute("aria-labelledby", name.id);
+        sw.disabled = consentBusy;
+        sw.append(el("i"));
+        sw.onclick = (e) => {
+          e.stopPropagation();
+          if (consentPicked.has(x.agent)) consentPicked.delete(x.agent); else consentPicked.add(x.agent);
+          const now = consentPicked.has(x.agent);
+          sw.classList.toggle("on", now);
+          sw.setAttribute("aria-checked", String(now));
+          const some = card.querySelector(".sm-consent-some");
+          if (some) some.disabled = consentBusy || !consentPicked.size;
+        };
+        row.onclick = () => sw.click();
+        row.append(icon(x.icon), name, sw);
+        list.append(row);
+      }
+      card.append(list);
+    } else {
+      card.append(el("p", "sm-consent-none", t("No agent's sessions were found on this computer yet.")));
+    }
+    const acts = el("div", "sm-consent-acts");
+    const save = async (all) => {
+      consentBusy = true;
+      draw();
+      const agents = {};
+      for (const x of found) agents[x.agent] = all || consentPicked.has(x.agent);
+      try {
+        await api("sessions/reads", { all, agents });
+        consentPicked.clear();
+        await load();
+      } catch (err) { status(err.message, "err"); }
+      finally { consentBusy = false; draw(); }
+    };
+    if (found.length) {
+      const some = el("button", "text sm-consent-some", t("Allow selected"));
+      some.type = "button";
+      some.disabled = consentBusy || !consentPicked.size;
+      some.onclick = () => save(false);
+      acts.append(some);
+    }
+    const all = el("button", "text primary sm-consent-all", t("Allow all"));
+    all.type = "button";
+    all.disabled = consentBusy;
+    all.onclick = () => save(true);
+    acts.append(all);
+    card.append(acts);
+    return card;
+  }
+
   function head() {
     const h = el("div", "usage-head sm-head");
     const wrap = el("div", "sm-switch");
@@ -429,10 +511,15 @@ magpie.plugin("sessions", (ctx) => {
       return box;
     }
     if (trashOn) { box.append(...trash()); return box; }
+    if (consentApplies()) box.append(consentCard());
     if (recordingApplies()) box.append(recordingCard());
     if (!data.agents.length) {
+      if (consentApplies()) return box;
       const e = el("div", "empty-state");
-      e.append(el("b", "", t("No sessions yet")), el("span", "", t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
+      e.append(el("b", "", t("No sessions yet")), el("span", "", data.reads?.gateway
+        // gateway mode lists no session of this computer's agents
+        ? t("The sessions of agents on other computers that use this gateway show up here, by the folder they ran in.")
+        : t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
       box.append(e);
       return box;
     }
@@ -536,17 +623,36 @@ magpie.plugin("sessions", (ctx) => {
     ed.append(h);
     const names = el("ul", "sm-ask-list sm-provider-list");
     const go = el("button", "text primary", t("Move"));
+    // over a longer list: how many are picked, Select all (Deselect all
+    // once all are) and Invert selection (Cyrus on Discord)
+    const pick = el("div", "sm-provider-pick");
+    const n = el("span", "note sm-count");
+    const all = el("button", "text sm-pick-all");
+    const flip = el("button", "text sm-pick-invert", t("Invert selection"));
+    all.type = flip.type = "button";
+    pick.append(n, el("span", "grow"), all, flip);
+    if (list.length > 1) ed.append(pick);
+    const boxes = [];
+    const sync = () => {
+      for (const [c, id] of boxes) c.checked = chosen.has(id);
+      go.disabled = !chosen.size;
+      n.textContent = t("{n} selected", { n: chosen.size });
+      all.textContent = t(chosen.size === list.length ? "Deselect all" : "Select all");
+    };
+    all.onclick = (e) => { e.stopPropagation(); const on = chosen.size < list.length; for (const s of list) on ? chosen.add(s.id) : chosen.delete(s.id); sync(); };
+    flip.onclick = (e) => { e.stopPropagation(); for (const s of list) chosen.has(s.id) ? chosen.delete(s.id) : chosen.add(s.id); sync(); };
     for (const s of list) {
       const li = el("li");
       const lab = el("label");
       const c = el("input", "sm-check");
       c.type = "checkbox";
-      c.checked = true;
-      c.onchange = () => { c.checked ? chosen.add(s.id) : chosen.delete(s.id); go.disabled = !chosen.size; };
+      c.onchange = () => { c.checked ? chosen.add(s.id) : chosen.delete(s.id); sync(); };
+      boxes.push([c, s.id]);
       lab.append(c, el("span", "name", s.title || s.id), el("span", "sm-prov", s.provider), el("span", "note", ago(s.last)));
       li.append(lab);
       names.append(li);
     }
+    sync();
     ed.append(names);
     ed.append(el("p", "lib-confirm", t("Only the provider each one names is changed, in its files and in Codex's database: its messages, id, title and archive stay as they are. A copy of its files is kept in magpie's trash folder first, and Undo moves them back. A session written to in the last minute is left alone.")));
     const bar = el("div", "bar");
@@ -684,14 +790,15 @@ magpie.plugin("sessions", (ctx) => {
     words.append(el("span", "name", t("Other folders")), el("span", "sm-latest", t("Temporary folders, the disk's root and apps' hidden folders")));
     fold.append(svg(CHEV_R, 10, 1.6), words);
     fold.onclick = () => { othersOpen = !open; redrawList(); };
-    r.append(fold, el("span", "note", t(rest.length === 1 ? "{n} folder" : "{n} folders", { n: rest.length })));
+    r.append(fold, el("span", "note", t(rest.length === 1 ? "{n} folder" : "{n} folders", { n: rest.length })), folderSlot());
     box.append(r);
     if (open) folderList(box, rest, OTHERS, q);
     return box;
   }
 
   // nest finds the sessions shown that are under another one shown: a
-  // Codex thread whose parent_session is, by a chain with no loop in it
+  // Codex thread, or a Claude branch, whose parent_session is, by a chain
+  // with no loop in it
   function nest(list) {
     const byId = new Map(list.map((s) => [s.id, s]));
     kidsOf = new Map();
@@ -811,7 +918,7 @@ magpie.plugin("sessions", (ctx) => {
       };
       r.append(more);
       r.oncontextmenu = (e) => { e.preventDefault(); openRowMenu(more, acts); };
-    }
+    } else r.append(folderSlot());
 
     r.title = path;
     g.append(r);
@@ -848,6 +955,34 @@ magpie.plugin("sessions", (ctx) => {
     return b;
   }
 
+  // lanes says which of a row's controls some session of the list has, so
+  // a row without one keeps its room and every row's columns line up
+  const laneOf = new WeakMap();
+  function lanes() {
+    const list = data?.sessions || [];
+    let l = laneOf.get(list);
+    if (!l) {
+      const resume = list.some((s) => s.resume);
+      l = { resume, term: resume && !!data.terminal, carry: list.some((s) => s.carry?.length) };
+      laneOf.set(list, l);
+    }
+    return l;
+  }
+  // slot is a control's room, unseen and out of reach
+  function slot(tag, cls, text) {
+    const b = el(tag, "sm-slot " + cls, text);
+    b.setAttribute("aria-hidden", "true");
+    b.inert = true;
+    b.tabIndex = -1;
+    return b;
+  }
+  const folderSlot = () => slot("span", "copy sm-folder-slot");
+  // undeletableText is why a session magpie lists can't be deleted
+  function undeletableText(s, a) {
+    if (s.undeletable === "cursor-editor") return t("Cursor's editor keeps this chat in its own database, which it holds open while it runs: delete it in Cursor.");
+    return t("This {agent} session is read only, so magpie can't delete it.", { agent: a.name });
+  }
+
   function item(s, depth = 0) {
     const a = current();
     const wrap = el("div", "sess-item sm-item" + (detail === s.id ? " open" : ""));
@@ -882,9 +1017,14 @@ magpie.plugin("sessions", (ctx) => {
     if (hit) who.append(hitLine(hit));
     // what it spent, as the Usage page's list shows it
     r.append(who, ...sessSpent(s));
+    const lane = lanes();
     if (s.resume) {
       const res = el("button", "sess-resume", t("Resume"));
       res.type = "button";
+      // as wide whichever it says
+      res.dataset.wide = t("Resume");
+      res.dataset.wide2 = t("Copied");
+
       res.title = t("Copy the command that resumes it: {cmd}", { cmd: s.resume });
       res.onclick = async (e) => {
         e.stopPropagation();
@@ -895,7 +1035,7 @@ magpie.plugin("sessions", (ctx) => {
         res.copiedT = setTimeout(() => { res.textContent = t("Resume"); res.classList.remove("done"); }, 1400);
       };
       r.append(res);
-      if (data.terminal) {
+      if (lane.term) {
         const term = el("button", "copy sess-term");
         term.type = "button";
         term.title = t("Open in session terminal");
@@ -906,15 +1046,34 @@ magpie.plugin("sessions", (ctx) => {
         };
         r.append(term);
       }
+    } else if (lane.resume) {
+      const res = slot("button", "sm-slot-resume", t("Resume"));
+      res.dataset.wide = t("Resume");
+      res.dataset.wide2 = t("Copied");
+      r.append(res);
+      if (lane.term) r.append(slot("span", "copy sm-slot-icon"));
     }
     if (s.carry?.length) r.append(carryPick(s));
-    if (a?.deletable && s.deletable) {
+    else if (lane.carry) {
+      const b = slot("button", "sess-pick sm-slot-carry");
+      b.append(el("span", "", t("Continue in")), svg(CHEV, 11, 1.6));
+      r.append(b);
+    }
+    // every session of an agent magpie deletes from has a delete; one it
+    // can't delete says why on it (ysm119 on Discord: some Cursor rows had
+    // none, and every column after it moved)
+    if (a?.deletable) {
       const del = el("button", "copy sm-del");
       del.type = "button";
-      del.title = t("Delete");
-      del.setAttribute("aria-label", t("Delete"));
+      const why = s.deletable ? "" : undeletableText(s, a);
+      del.title = why || t("Delete");
+      del.setAttribute("aria-label", why ? t("Delete") + ": " + why : t("Delete"));
       del.append(svg(TRASH, 13, 1.4));
-      del.onclick = (e) => { e.stopPropagation(); askDelete([s.id]); };
+      if (why) {
+        del.classList.add("off");
+        del.setAttribute("aria-disabled", "true");
+        del.onclick = (e) => { e.stopPropagation(); status(why, "err"); };
+      } else del.onclick = (e) => { e.stopPropagation(); askDelete([s.id]); };
       r.append(del);
     }
     // only the session opened and the one closed are drawn again
@@ -938,18 +1097,23 @@ magpie.plugin("sessions", (ctx) => {
 
   // subagentsBox is the fold under a session with its subagents: those
   // its agent started inside it, each opened to its conversation, and the
-  // Codex threads it started, drawn as sessions
+  // Codex threads it started, drawn as sessions; and the Claude sessions
+  // forked from it that went on (role "branch"), named apart
   function subagentsBox(s, kids, depth) {
     const box = el("div", "sm-subs");
     const k = s.agent + "/" + s.id;
     const subs = subTree(s.subagents || []);
-    const n = kids.length + subs.length;
+    const branches = kids.filter((c) => c.role === "branch").length;
+    const n = kids.length + subs.length - branches;
+    const words = [];
+    if (branches) words.push(t(branches === 1 ? "{n} branch" : "{n} branches", { n: branches }));
+    if (n || !branches) words.push(t(n === 1 ? "{n} subagent" : "{n} subagents", { n }));
     const draw = () => {
       const open = subsOpen.has(k) || (!!query.trim() && kids.length > 0);
       const fold = el("button", "fold sm-subs-fold");
       fold.type = "button";
       fold.setAttribute("aria-expanded", String(open));
-      fold.append(svg(CHEV_R, 10, 1.6), el("span", "", t(n === 1 ? "{n} subagent" : "{n} subagents", { n })));
+      fold.append(svg(CHEV_R, 10, 1.6), el("span", "", words.join(" · ")));
       fold.onclick = (e) => {
         e.stopPropagation();
         if (subsOpen.has(k)) subsOpen.delete(k); else subsOpen.add(k);

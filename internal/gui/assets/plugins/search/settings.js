@@ -50,6 +50,9 @@ function renderSearch(s, keep) {
   key.setAttribute("aria-label", t("API key"));
   const get = el("button", "link", t("Get a key ↗"));
   get.onclick = () => vendor().keysURL && api("open", { url: vendor().keysURL });
+  // a plugin's API that signs in as the plugin's provider takes no key: its
+  // accounts are the provider's, on Providers
+  const signs = el("span", "search-signs");
   const draw = () => {
     const v = vendor();
     pick.replaceChildren(el("span", "", v.name || ""), svg(CHEV, 11, 1.6));
@@ -63,7 +66,10 @@ function renderSearch(s, keep) {
       : saved()?.key ? t("A new key, or empty to keep {key}", { key: saved().key })
       : v.keyOptional ? t("API key, or empty for its free search")
       : t("API key, or several split by commas");
-    get.hidden = !v.keysURL;
+    get.hidden = !v.keysURL || !!v.auth;
+    key.hidden = !!v.auth;
+    signs.hidden = !v.auth;
+    signs.textContent = v.auth ? t("Signs in with {name}", { name: v.auth.name }) : "";
   };
   pick.onclick = (e) => {
     e.stopPropagation();
@@ -76,7 +82,7 @@ function renderSearch(s, keep) {
     d.key = key.value.trim(); d.url = url.value.trim();
     // one added before keeps its key when none is typed
     // You.com is asked at its free search with none (#1626)
-    if (vendor().needURL ? !d.url : !d.key && !saved()?.key && !vendor().keyOptional) return (vendor().needURL ? url : key).focus();
+    if (vendor().needURL ? !d.url : !d.key && !saved()?.key && !vendor().keyOptional && !vendor().auth) return (vendor().needURL ? url : key).focus();
     set({ vendor: d.vendor, key: d.key, url: d.url },
       () => { searchDraft = { vendor: d.vendor, key: "", url: "", err: "" }; });
   };
@@ -93,7 +99,7 @@ function renderSearch(s, keep) {
     : apiFirst ? t("Asked before {who}, which searches when these fail", { who: s.searchProvider })
     : t("Now done by {who}; these come after it", { who: s.searchProvider });
   const head = row(t("Search APIs"), d.err || t("When a model can't search the web, magpie searches for it with these, in this order, and gives it what they found") + " · " + by,
-    pick, key, get, add, url);
+    pick, key, signs, get, add, url);
   head.classList.add("rule-row", "search-add");
   head.querySelector(".val").classList.add("rule-add");
   if (d.err) head.querySelector(".sub").classList.add("err");
@@ -106,7 +112,13 @@ function renderSearch(s, keep) {
     units.push(unit);
     const x = el("button", "text", t("Remove"));
     x.onclick = () => set({ vendor: a.vendor, remove: true });
-    const what = [a.key || (a.ready ? "" : t("needs its key")), a.url].filter(Boolean).join(" · ");
+    // one that signs in says whose accounts it uses, or why it has none
+    const auth = vendors.find((v) => v.id === a.vendor)?.auth;
+    const signedIn = !auth ? ""
+      : !auth.signedIn ? t("Not signed in to {name}: sign in to it on Providers", { name: auth.name })
+      : !auth.on ? t("No account of {name} is on", { name: auth.name })
+      : t("Signed in to {name} · accounts on: {n}", { name: auth.name, n: auth.on });
+    const what = [signedIn || a.key || (a.ready ? "" : t("needs its key")), a.url].filter(Boolean).join(" · ");
     const tools = [x];
     if (a.key) {
       // its saved key shown in its row and hidden again, as a provider's
@@ -146,6 +158,7 @@ function renderSearch(s, keep) {
     tools.push(sw);
     const r = row(`${n + 1}. ${a.name}`, a.off ? [t("Off"), what].filter(Boolean).join(" · ") : what, ...tools);
     r.classList.add("search-api");
+    if (auth && !a.off && !(auth.signedIn && auth.on)) r.querySelector(".sub").classList.add("err");
     // with-keys, not :has(), which Safari before 15.4 can't parse
     if (a.keys > 1 || a.quota) { unit.classList.add("with-keys"); searchKeysRow(s, a, row, set); }
     into = box;
@@ -159,12 +172,34 @@ function renderSearch(s, keep) {
         (v) => savePrefs({ ...keep, searchFirst: v === "api" ? "api" : "" })));
     r.id = "searchFirstRow";
   }
+  // a model whose provider searches the web by itself is given magpie's
+  // search instead, as every other model is (cybercaius on Discord). The
+  // row is always there: with nothing magpie can search with it can't be
+  // chosen, and says why and where to add a search ("开关在哪个位置")
+  {
+    const can = !!(s.searchProvider || asked.length);
+    const sw = segs([["own", t("Their own")], ["magpie", t("magpie's")]], s.searchAll ? "magpie" : "own",
+      (v) => writingPrefs(api("settings/search-all", { on: v === "magpie" }))
+        .then((ns) => { prefs = state.settings = ns; renderSettings(); }).catch(settingsErr));
+    if (!can) for (const b of sw.querySelectorAll("button")) b.disabled = true;
+    const r = row(t("Models that search by themselves"), can ? t("Search with their provider's own search, or with magpie's, as every other model does")
+      : t("magpie has nothing to search with: add a Search API above, or pick a provider under Searches for other models"), sw);
+    r.id = "searchAllRow";
+    r.classList.add("search-all-row", ...(can ? [] : ["off"]));
+  }
   // the same search as an MCP server of the gateway's (Kayphoon on
   // Discord), for an agent to mount as its web_search and web_fetch tools
   const mcpURL = mcpAddress(s, "/mcp/magpie/web-search");
   const mcp = row(t("MCP server"), t("Cursor, Claude Desktop and other agents can add this search as an MCP server (Streamable HTTP), with a web_search tool and a web_fetch tool that reads a page by its URL. From another computer, send a gateway key as Authorization: Bearer <key>."),
     el("code", "", mcpURL), copyBtn(mcpURL, t("Address")));
   mcp.id = "searchMcpRow";
+  // The Library gives this search to the agents picked for it, as Magpie
+  // Web Search, and lists it under its MCP servers: an address alone had
+  // the reader look for it there and not find it (lutra_fs on Discord).
+  // As Images' Magpie Image (#2091), the row says how to get there from
+  // where the reader is: gateway mode has no Library, and the Library can
+  // be turned off
+  mcp.querySelector(".who").append(...libWay("magpie-web-search", t("Give agents Magpie Web Search…"), "search-mcp-lib"));
 }
 
 // searchArrange: the search APIs are asked in the order they are listed,
@@ -299,7 +334,7 @@ function renderSearcher(s, keep, box) {
     const [pid, ...rest] = id.split("/");
     const c = choices.find((x) => x.id === pid);
     if (!c) return id;
-    if (c.service) return `${c.name} · ${t("its web search")}`;
+    if (c.service || (c.search && rest.join("/") === "@search")) return `${c.name} · ${t("its web search")}`;
     if (!rest.length) return `${c.name} · ${c.smallName || c.small}`;
     const m = c.models.find((x) => x.id === id);
     return `${m ? m.name : rest.join("/")} · ${c.name}`;
@@ -307,7 +342,7 @@ function renderSearcher(s, keep, box) {
   const icOf = (id) => choices.find((x) => x.id === id.split("/")[0])?.icon;
   const r = el("div", "row pref searcher-row");
   const who = el("div", "who");
-  const sub = el("div", "sub", off ? t("When provider search is off, only configured Search APIs are used. Without a Search API, magpie does not add a search tool. Providers' native web search is unchanged.") : t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if the provider magpie picks fails, it tries other available sources, but a provider you select here is never replaced by another provider, only by your Search APIs."));
+  const sub = el("div", "sub", off ? (s.searchAll ? t("When provider search is off, only configured Search APIs are used, for every model. Without a Search API, magpie does not add a search tool.") : t("When provider search is off, only configured Search APIs are used. Without a Search API, magpie does not add a search tool. Providers' native web search is unchanged.")) : t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if the provider magpie picks fails, it tries other available sources, and a provider you select here gives way to the ones you add after it, in their order, then, when it can't search at all (out of quota or rate-limited), to other available sources, then to your Search APIs."));
   if (!off && v && s.searchUnused) {
     const why = { gone: t("it is no longer in magpie"), off: t("it is turned off"), cant: t("it can't search the web by itself"), nomodel: t("it lists no model") }[s.searchUnused] || s.searchUnused;
     sub.append(" · ", el("span", "warn searcher-unused", t("{who} isn't used: {why}, so magpie picks one", { who: named(v), why })));
@@ -319,7 +354,10 @@ function renderSearcher(s, keep, box) {
   const failed = s.searchFailed;
   if (!off && v && !s.searchUnused && failed) {
     const why = failed.notSearched ? t("it answered without searching the web, so its account or plan may not offer web search") : failed.nothingFound ? t("its reply named no page it found") : failed.why || t("it failed");
-    sub.prepend(el("span", "warn searcher-failed", t("{who} didn't search {when}: {why}. No other provider searched in its place; pick Automatic or another provider, or add a Search API.", { who: named(v), when: ago(failed.at), why })), " · ");
+    const said = failed.instead ? t("{who} didn't search {when}: {why}. {next} searched in its place.", { who: named(failed.searcher), when: ago(failed.at), why, next: named(failed.instead) })
+      : (s.searcherThen || []).length ? t("{who} didn't search {when}: {why}. The ones after it didn't search either; add another provider after it, or a Search API.", { who: named(v), when: ago(failed.at), why })
+      : t("{who} didn't search {when}: {why}. No other provider searched in its place; pick Automatic or another provider, or add a Search API.", { who: named(v), when: ago(failed.at), why });
+    sub.prepend(el("span", "warn searcher-failed", said), " · ");
   }
   const plans = choices.filter((c) => c.service).map((c) => c.name);
   if (!off && plans.length) sub.append(" · ", el("span", "searcher-own",
@@ -351,6 +389,9 @@ function renderSearcher(s, keep, box) {
       options.push({ value: c.id, label: t("its web search"), note: c.name, icon: c.icon, group: c.name });
       continue;
     }
+    // a ChatGPT account searches by its own web search, with no model's
+    // tokens spent (lucy_85908 on Discord); its models stay to be picked
+    if (c.search) options.push({ value: `${c.id}/@search`, label: t("its web search"), note: c.name, icon: c.icon, group: c.name });
     // its small model is offered once (Player on Discord): the model of the
     // same name below it searched just the same, "<provider>/<small>" being
     // that model named rather than magpie's pick, so a pick saved so is
@@ -365,6 +406,43 @@ function renderSearcher(s, keep, box) {
   val.append(b);
   if (!off) sideEffortChip(val, s.searchEfforts, s.searcherEffort || "", s.searchEffortNow, "searcher-effort",
     "none sent, the model's own", (e) => savePrefs({ ...keep, searcherEffort: e }));
+  r.append(who, val);
+  box.append(r);
+  if (!off && v && !s.searchUnused) renderSearcherThen(s, keep, box, options, named, icOf);
+}
+
+// renderSearcherThen: the providers asked, in their order, when the one
+// named above fails to search, and no other (axelburks on Discord: "代搜
+// 供应商能不能支持设置多个，这样可以一个失败了换另一个供应商"). Each
+// is a chip that changes or removes it, and Add puts one at the end.
+function renderSearcherThen(s, keep, box, options, named, icOf) {
+  const v = s.searcher || "";
+  const then = s.searcherThen || [];
+  const save = (list) => savePrefs({ ...keep, searcherThen: list });
+  // what can still be added: not the one above, nor one listed already
+  const free = (keepOne) => options.filter((o) => !o.reset && o.value !== v && (o.value === keepOne || !then.includes(o.value)));
+  const r = el("div", "row pref searcher-then");
+  const who = el("div", "who");
+  who.append(el("div", "name", t("If it fails")),
+    el("div", "sub", t("These providers search in its place, in this order, when the one above fails; no other provider does.")));
+  const val = el("div", "val searcher-then-list");
+  then.forEach((x, n) => {
+    const b = el("button", "rt-cond on searcher-then-pick");
+    b.type = "button";
+    b.append(el("span", "searcher-then-n", `${n + 1}.`), icon(icOf(x) || "generic"), el("span", "", named(x)));
+    b.onclick = (ev) => openPicker({ id: "", name: "", fields: [] }, { key: "searcherThen", label: "model", value: x,
+      options: [{ value: "", label: t("Remove"), reset: true }, ...free(x)],
+      onPick: (id) => { if (id !== x) save(id ? then.map((y, i) => i === n ? id : y) : then.filter((_, i) => i !== n)); } }, b, ev);
+    val.append(b);
+  });
+  const left = free("");
+  if (left.length) {
+    const add = el("button", "text searcher-then-add", t("Add"));
+    add.type = "button";
+    add.onclick = (ev) => openPicker({ id: "", name: "", fields: [] }, { key: "searcherThen", label: "model", value: "", options: left,
+      onPick: (id) => { if (id) save([...then, id]); } }, add, ev);
+    val.append(add);
+  }
   r.append(who, val);
   box.append(r);
 }

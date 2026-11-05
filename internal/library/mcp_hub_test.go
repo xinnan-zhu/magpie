@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -460,7 +461,7 @@ func TestHubEntryFromAnotherMachine(t *testing.T) {
 	hubSandbox(t)
 	const there = "http://172.20.0.1:3425"
 	at := func(gw string) *Server {
-		return hubServerFor(&Target{Agent: &agent.Agent{ID: "claude", Gateway: func() string { return gw }}})
+		return (&Library{}).hubServerFor(&Target{Agent: &agent.Agent{ID: "claude", Gateway: func() string { return gw }}})
 	}
 	if s := at(there); s.URL != there+gateway.HubMCPPath+"claude" || len(s.Headers) != 0 {
 		t.Errorf("nothing shared: %+v", s)
@@ -522,5 +523,256 @@ func TestHubLink(t *testing.T) {
 
 	if _, err := HubLink("javascript:alert(1)"); err == nil {
 		t.Fatal("an app with no install link was given one")
+	}
+}
+
+// A server kept direct (#4382, cuipengcx90) stays each agent's own entry
+// with the hub on, written as with the hub off, beside magpie's for the
+// rest; switching it either way writes the agents again, the entry it had
+// the other way gone, and the hub neither lists nor runs it.
+func TestHubDirectServer(t *testing.T) {
+	h := hubSandbox(t)
+	claude := filepath.Join(h, ".claude.json")
+	write(t, claude, `{"mcpServers": {"mine": {"command": "x"}}}`)
+	codex := filepath.Join(h, ".codex/config.toml")
+	write(t, codex, "")
+	ok(t)(SaveServer("", Server{Name: "index", Transport: "stdio", Command: "npx", Args: []string{"-y", "indexer"}, Env: map[string]string{"K": "v"}, Agents: []string{"claude", "codex"}, Hub: "direct"}))
+	ok(t)(SaveServer("", Server{Name: "web", Transport: "http", URL: "https://example.com/mcp", Agents: []string{"claude", "codex"}, Hub: "shared"}))
+	entries := func(id string) map[string]map[string]any {
+		t.Helper()
+		e, err := targetByID(id).MCP.entries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	names := func(id string) []string {
+		var out []string
+		for k := range entries(id) {
+			out = append(out, k)
+		}
+		slices.Sort(out)
+		return out
+	}
+	off := map[string]string{} // each agent's index entry with the hub off
+	for _, id := range []string{"claude", "codex"} {
+		b, _ := json.Marshal(entries(id)["index"])
+		off[id] = string(b)
+	}
+	if l, err := load(); err != nil || l.server("web").Hub != "" || l.server("index").Hub != HubDirect {
+		t.Fatalf("saved: %v %+v", err, l)
+	}
+
+	ok(t)(SetMCPHub(true))
+	for id, want := range map[string][]string{"claude": {"index", "magpie", "mine"}, "codex": {"index", "magpie"}} {
+		if got := names(id); !slices.Equal(got, want) {
+			t.Fatalf("%s with the hub on: %v, want %v\n%s\n%s", id, got, want, read(t, claude), read(t, codex))
+		}
+		if b, _ := json.Marshal(entries(id)["index"]); string(b) != off[id] {
+			t.Errorf("%s's direct entry %s, with the hub off %s", id, b, off[id])
+		}
+	}
+	for _, id := range []string{"claude", ""} {
+		var got []string
+		for _, s := range hubServers(id) {
+			got = append(got, s.Name)
+		}
+		if !slices.Equal(got, []string{"web"}) {
+			t.Errorf("the hub serves %q: %v, want only web", id, got)
+		}
+	}
+
+	// shared again: behind the hub, its own entry gone
+	ok(t)(ServerHub("index", false))
+	for _, id := range []string{"claude", "codex"} {
+		if got := names(id); slices.Contains(got, "index") || !slices.Contains(got, "magpie") {
+			t.Fatalf("%s with index shared: %v\n%s\n%s", id, got, read(t, claude), read(t, codex))
+		}
+	}
+	// every server direct: the hub's entry goes, each written as with it off
+	ok(t)(ServerHub("index", true))
+	ok(t)(ServerHub("web", true))
+	if got := names("claude"); !slices.Equal(got, []string{"index", "mine", "web"}) {
+		t.Fatalf("claude with every server direct: %v\n%s", got, read(t, claude))
+	}
+	if got := names("codex"); !slices.Equal(got, []string{"index", "web"}) {
+		t.Fatalf("codex with every server direct: %v\n%s", got, read(t, codex))
+	}
+	if _, err := ServerHub("nope", true); err == nil {
+		t.Error("a server not in the library was set")
+	}
+	if _, err := SaveServer("", Server{Name: "odd", Transport: "stdio", Command: "x", Hub: "session"}); err == nil {
+		t.Error("an unknown hub policy was saved")
+	}
+}
+
+// magpie's own image server is in the hub too: listed as a tool that
+// writes into the agent's project (Roots), and each call made with the
+// agent's roots and name in _meta, an empty list when it has none here,
+// so it saves into that agent's project. The agent's file has the hub's
+// entry and not the server's own.
+// An agent is told what each server behind the hub is for, from the
+// market: the featured server it is by its address whatever it is named,
+// the featured one it is named after, and nothing made up for the rest.
+func TestHubSaysWhatServersAreFor(t *testing.T) {
+	hubSandbox(t)
+	ok(t)(SaveServer("", Server{Name: "wiki", Transport: "http", URL: "https://mcp.deepwiki.com/mcp/", Agents: []string{"pi"}}))
+	c7 := fakeStdio(t, "ok", nil)
+	c7.Name, c7.Agents = "context7", []string{"pi"}
+	ok(t)(SaveServer("", *c7))
+	notes := fakeStdio(t, "ok", nil)
+	notes.Name, notes.Agents = "notes", []string{"pi", "claude"}
+	ok(t)(SaveServer("", *notes))
+	ok(t)(SetMCPHub(true))
+	m, _ := marketServer("deepwiki")
+	c, _ := marketServer("context7")
+	want := []gateway.HubServer{{Name: "context7", About: c.Description}, {Name: "notes"}, {Name: "wiki", About: m.Description}}
+	if got := (theHub{}).Servers("pi"); !reflect.DeepEqual(got, want) || m.Description == "" || c.Description == "" {
+		t.Fatalf("pi's servers %+v, want %+v", got, want)
+	}
+	if got := (theHub{}).Servers("claude"); !reflect.DeepEqual(got, []gateway.HubServer{{Name: "notes"}}) {
+		t.Fatalf("claude's servers %+v", got)
+	}
+}
+
+// Pi writes its first prompt before it has connected to the hub (it waits
+// for no codemode server), so the hub entry in its mcp.json says what the
+// hub serves as its description, the line Pi shows of a server, and the
+// line follows the servers ticked. Another entry's description is the
+// user's.
+func TestHubPiDescription(t *testing.T) {
+	h := hubSandbox(t)
+	setPiVersion(t, "1.4.0")
+	file := filepath.Join(h, ".pi/agent/mcp.json")
+	write(t, file, `{"mcpServers": {"theirs": {"command": "t", "description": "My own."}}}`)
+	ok(t)(SaveServer("", Server{Name: "wiki", Transport: "http", URL: "https://mcp.deepwiki.com/mcp", Agents: []string{"pi"}}))
+	ok(t)(SetMCPHub(true))
+	about := func() string {
+		t.Helper()
+		d, _ := piServers(t, file)[HubEntry]["description"].(string)
+		return d
+	}
+	wiki, _ := marketServer("deepwiki")
+	if d := about(); d != gateway.HubLine([]gateway.HubServer{{Name: "wiki", About: wiki.Description}}) || !strings.Contains(d, "GitHub repository") {
+		t.Fatalf("the hub entry's description %q:\n%s", d, read(t, file))
+	}
+	ok(t)(SaveServer("", Server{Name: "context7", Transport: "http", URL: "https://mcp.context7.com/mcp", Agents: []string{"pi"}}))
+	if d := about(); !strings.Contains(d, "context7 (") || !strings.Contains(d, "wiki (") {
+		t.Fatalf("context7 ticked: %q", d)
+	}
+	// one edited by hand is magpie's again on the next sync
+	write(t, file, strings.Replace(read(t, file), "Tools of", "Tools from", 1))
+	ok(t)(Sync())
+	if d := about(); !strings.HasPrefix(d, "Tools of context7") {
+		t.Fatalf("after a sync: %q", d)
+	}
+	if d, _ := piServers(t, file)["theirs"]["description"].(string); d != "My own." {
+		t.Fatalf("the user's description: %q", d)
+	}
+}
+
+func TestHubGivesMagpieImage(t *testing.T) {
+	h := hubSandbox(t)
+	claude := filepath.Join(h, ".claude.json")
+	write(t, claude, `{"mcpServers": {}}`)
+	img := fakeStdio(t, "ok", nil)
+	img.Name, img.Args, img.Agents = selfServerName, []string{"mcp", "image"}, []string{"claude"}
+	ok(t)(SaveServer("", *img))
+	ok(t)(SetMCPHub(true))
+	hub := theHub{}
+	ctx := context.Background()
+
+	tools := hub.Tools(ctx, "claude")
+	if got := hubNames(tools); !slices.Equal(got, []string{"magpie-image/a", "magpie-image/b", "magpie-image/c"}) {
+		t.Fatalf("claude's tools %v, want magpie-image's", got)
+	}
+	for _, x := range tools {
+		if !x.Roots {
+			t.Errorf("%s/%s isn't said to write into the project", x.Server, x.Tool)
+		}
+	}
+	e, err := targetByID("claude").MCP.entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e["magpie"] == nil || e[selfServerName] != nil {
+		t.Fatalf("claude's file:\n%s", read(t, claude))
+	}
+
+	res, err := hub.Call(gateway.WithHubCaller(ctx, gateway.HubCaller{Roots: []string{"file:///work/proj"}, Client: "claude-code/2.1.314"}), "claude", selfServerName, "a", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hubText(t, res); !strings.Contains(got, `meta={"magpie/client":"claude-code/2.1.314","magpie/roots":["file:///work/proj"]}`) {
+		t.Errorf("called as %q", got)
+	}
+	res, err = hub.Call(ctx, "claude", selfServerName, "a", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hubText(t, res); !strings.Contains(got, `meta={"magpie/roots":[]}`) {
+		t.Errorf("no roots: called as %q", got)
+	}
+}
+
+// The router runs one Magpie Browser for every agent behind it, so each
+// call names its caller's session in _meta, for the browser to keep each
+// caller in a tab of its own; another server is sent no session, and a
+// call with none (a caller not told apart) is sent none.
+func TestHubTellsMagpieBrowserItsCaller(t *testing.T) {
+	h := hubSandbox(t)
+	write(t, filepath.Join(h, ".claude.json"), `{"mcpServers": {}}`)
+	br := fakeStdio(t, "ok", nil)
+	br.Name, br.Args, br.Agents = browserServerName, []string{"mcp", "browser"}, []string{"claude"}
+	ok(t)(SaveServer("", *br))
+	other := fakeStdio(t, "ok", nil)
+	other.Agents = []string{"claude"}
+	ok(t)(SaveServer("", *other))
+	ok(t)(SetMCPHub(true))
+	hub := theHub{}
+	ctx := context.Background()
+
+	for _, s := range []string{"hub-claude-one", "hub-claude-two"} {
+		res, err := hub.Call(gateway.WithHubCaller(ctx, gateway.HubCaller{Session: s}), "claude", browserServerName, "a", json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hubText(t, res); !strings.Contains(got, `meta={"magpie/session":"`+s+`"}`) {
+			t.Errorf("browser called as %q, want session %s", got, s)
+		}
+	}
+	res, err := hub.Call(gateway.WithHubCaller(ctx, gateway.HubCaller{Session: "hub-claude-one"}), "claude", "fake", "a", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hubText(t, res); strings.Contains(got, "meta=") {
+		t.Errorf("another server was sent the session: %q", got)
+	}
+	res, err = hub.Call(ctx, "claude", browserServerName, "a", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hubText(t, res); strings.Contains(got, "meta=") {
+		t.Errorf("no session: called as %q", got)
+	}
+}
+
+// Another magpie's router is sent the session too, to pass on to its
+// Magpie Browser; any other URL isn't.
+func TestKeepsSession(t *testing.T) {
+	for _, c := range []struct {
+		s    Server
+		want bool
+	}{
+		{Server{Transport: "stdio", Command: "/Applications/Magpie.app/Contents/MacOS/magpie", Args: []string{"mcp", "browser"}}, true},
+		{Server{Transport: "stdio", Command: "magpie", Args: []string{"mcp", "image"}}, false},
+		{Server{Transport: "http", URL: "http://10.0.0.2:3425/mcp/magpie/hub"}, true},
+		{Server{Transport: "http", URL: "http://10.0.0.2:3425/mcp/magpie/hub/claude"}, true},
+		{Server{Transport: "http", URL: "https://mcp.example.com/mcp"}, false},
+		{Server{Transport: "http", URL: "https://example.com/x/mcp/magpie/hub"}, false},
+	} {
+		if got := keepsSession(&c.s); got != c.want {
+			t.Errorf("%+v: %v, want %v", c.s, got, c.want)
+		}
 	}
 }

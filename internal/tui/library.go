@@ -64,6 +64,9 @@ func (m *model) reloadLibrary() {
 		if s.Command != "" {
 			what = strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
 		}
+		if s.Local {
+			what = "not synced · " + what
+		}
 		m.lib = append(m.lib, libRow{kind: "mcp", name: s.Name, about: what, on: s.Agents, bad: len(s.Problems)})
 	}
 	for _, s := range v.Skills {
@@ -421,7 +424,9 @@ func saveServer(old *library.Server, line string) tea.Cmd {
 		if old != nil {
 			was, done = old.Name, "saved "+s.Name
 			// and its OAuth app and startup timeout, which only the GUI edits
-			s.Agents, s.Env, s.Headers, s.OAuth, s.StartupTimeout = old.Agents, old.Env, old.Headers, old.OAuth, old.StartupTimeout
+			// and whether it is kept to this computer, and out of the hub,
+			// and the user's note on it
+			s.Agents, s.Env, s.Headers, s.OAuth, s.StartupTimeout, s.Local, s.Hub, s.Note = old.Agents, old.Env, old.Headers, old.OAuth, old.StartupTimeout, old.Local, old.Hub, old.Note
 		}
 		return libCmd(func() (*library.Result, error) { return library.SaveServer(was, s) }, done)()
 	}
@@ -446,8 +451,14 @@ func (m *model) openProbe(p *library.Probe) {
 	var items []agent.Option
 	for _, c := range p.Candidates {
 		note := c.Description
-		if c.Have {
+		switch {
+		case c.Have && c.As != "":
+			note = "in the library as " + c.As + " · " + note
+		case c.Have:
 			note = "in the library already · " + note
+		case c.As != "":
+			// another skill from elsewhere has its name
+			note = "adds as " + c.As + " · " + note
 		}
 		v := c.Path
 		if v == "" {

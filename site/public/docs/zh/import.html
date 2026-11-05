@@ -30,7 +30,10 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/import">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/import">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/import">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/import">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/import">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Add to magpie">
 <meta property="og:description" content="一个链接，把你的模型送进用户的每个 Agent。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
@@ -50,6 +53,8 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -141,7 +146,7 @@
     <h3 id="presets">预设</h3>
     <p>magpie 已经内置的厂商。<code>magpie presets</code> 会打印当前的列表。</p>
     <div class="chips">
-      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
+      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>longcat</code></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>qwencloud</code><span>ap-southeast-1 · us-east-1 · eu-central-1 · ap-northeast-1 · cn-hongkong · cn-beijing</span></span><span class="chip"><code>qwencloud-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
     </div>
     <p>有预设的厂商只需带上密钥：<code>magpie://import?preset=deepseek&amp;key=sk-…</code>。想加入列表？<a href="https://github.com/yetone/magpie/issues">提个 issue</a>。</p>
 
@@ -265,8 +270,11 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>
@@ -294,8 +302,8 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     ["anthropic", "Anthropic"], ["openai", "OpenAI"], ["google", "Google Gemini"], ["deepseek", "DeepSeek"], ["xai", "xAI"],
     ["moonshot", "Kimi"], ["moonshot-cn", "Kimi（中国）"], ["kimi-code", "Kimi Code"], ["kimi-code-cn", "Kimi Code（中国）"], ["zhipu", "智谱 GLM"],
     ["zai", "Z.ai"], ["minimax", "MiniMax"], ["minimax-cn", "MiniMax（中国）"], ["stepfun", "阶跃星辰"], ["stepfun-cn", "阶跃星辰（中国）"],
-    ["xiaomi", "小米 MiMo"], ["baidu-qianfan", "百度千帆"], ["tencent-cloud", "腾讯云"],
-    ["huaweicloud", "华为云 MaaS"], ["volcengine", "火山方舟"], ["qwen", "通义千问"], ["qwen-cn", "通义千问（中国）"], ["qwen-token-plan", "通义千问 Token Plan"], ["bailian-token-plan", "阿里云百炼 Token Plan"],
+    ["xiaomi", "小米 MiMo"], ["longcat", "LongCat"], ["baidu-qianfan", "百度千帆"], ["tencent-cloud", "腾讯云"],
+    ["huaweicloud", "华为云 MaaS"], ["volcengine", "火山方舟"], ["qwen", "通义千问"], ["qwen-cn", "通义千问（中国）"], ["qwen-token-plan", "通义千问 Token Plan"], ["bailian-token-plan", "阿里云百炼 Token Plan"], ["qwencloud", "Qwen Cloud"], ["qwencloud-token-plan", "Qwen Cloud Token Plan"],
     ["mistral", "Mistral"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"],
     ["opencode-go", "OpenCode Go"], ["clinepass", "ClinePass"], ["opencode-zen", "OpenCode Zen"], ["kilo", "Kilo Gateway"], ["commandcode", "Command Code"],
     ["together", "Together AI"], ["fireworks", "Fireworks"], ["siliconflow", "硅基流动"], ["nvidia", "NVIDIA NIM"], ["modelscope", "魔搭 ModelScope"],
@@ -312,6 +320,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     "tencent-cloud": [["", "套餐 · 中国"], ["cn", "按量 · 中国"], ["intl", "按量 · 国际"], ["enterprise", "企业版套餐 · 中国"], ["enterprise-intl", "企业版套餐 · 国际"]],
     "huaweicloud": [["", "Token Plan"], ["api", "按量付费"]],
     "volcengine": [["", "Coding Plan"], ["agent", "Agent Plan"], ["api", "按量付费"]],
+    "qwencloud": [["", "ap-southeast-1"], ["us-east-1", "us-east-1"], ["eu-central-1", "eu-central-1"], ["ap-northeast-1", "ap-northeast-1"], ["cn-hongkong", "cn-hongkong"], ["cn-beijing", "cn-beijing"]],
     "bedrock": [["", "us-east-1"], ["us-east-2", "us-east-2"], ["us-west-2", "us-west-2"], ["eu-central-1", "eu-central-1"], ["eu-west-1", "eu-west-1"], ["eu-west-3", "eu-west-3"], ["ap-northeast-1", "ap-northeast-1"], ["ap-southeast-1", "ap-southeast-1"], ["ap-southeast-2", "ap-southeast-2"], ["ap-south-1", "ap-south-1"]],
     "siliconflow": [["", "中国"], ["intl", "国际"]],
     "yylx": [["", "自动"], ["global", "海外"], ["cn", "中国大陆"]],

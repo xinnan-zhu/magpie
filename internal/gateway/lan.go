@@ -3,9 +3,11 @@ package gateway
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/netguard"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -128,8 +131,95 @@ func PublicHost() string {
 
 // ContainerAddrs: the addresses magpie finds for itself are a container's,
 // which other machines can't reach, and MAGPIE_PUBLIC_URL doesn't say the
-// host's.
-func ContainerAddrs() bool { return publicURL() == "" && inContainer("/") }
+// host's. A container on the host's network (network_mode: host, which
+// NAS panels offer) has the host's own addresses, and they are said as
+// they are.
+func ContainerAddrs() bool {
+	return publicURL() == "" && inContainer("/") && !hostNetwork(ifaceNames())
+}
+
+// hostNetwork: the interfaces names are the host's, not a container's own:
+// a host running containers has their bridges and veth pairs (docker0,
+// br-…, veth…, Podman's cni-podman0 or podman0), which a container on a
+// bridge network never sees; it has its eth0 alone.
+func hostNetwork(names []string) bool {
+	for _, n := range names {
+		for _, p := range []string{"docker0", "br-", "veth", "cni-podman", "podman"} {
+			if strings.HasPrefix(n, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ifaceNames are this system's network interfaces' names; a variable for
+// the tests.
+var ifaceNames = func() []string {
+	ifs, _ := net.Interfaces()
+	out := make([]string, 0, len(ifs))
+	for _, i := range ifs {
+		out = append(out, i.Name)
+	}
+	return out
+}
+
+// ContainerHostURL is where other containers on this host reach the
+// gateway while magpie runs in a container on a bridge network: the host
+// at the container's default route, the bridge's gateway (Docker's
+// 172.17.0.1), on the gateway's port as published. The container's own
+// address is reached only from its own Docker network, and the host's LAN
+// address may not be reached from a container through the NAS's firewall
+// (jiezhengj on Discord: 192.168.31.218 worked from other devices, and
+// other containers on the NAS needed 172.17.0.1); host.docker.internal is
+// not there on Linux unless a container is given it. "" when magpie is
+// not in a container, is on the host's network, or has no default route.
+func ContainerHostURL() string {
+	if !inThisContainer() || hostNetwork(ifaceNames()) {
+		return ""
+	}
+	gw := defaultGateway(routeTable())
+	if gw == "" {
+		return ""
+	}
+	return Scheme() + "://" + net.JoinHostPort(gw, Port())
+}
+
+// inThisContainer is inContainer("/"); a variable for the tests.
+var inThisContainer = func() bool { return inContainer("/") }
+
+// routeTable is Linux's IPv4 routing table; a variable for the tests.
+var routeTable = func() string {
+	b, _ := os.ReadFile("/proc/net/route")
+	return string(b)
+}
+
+// defaultGateway is the gateway of /proc/net/route's default route: its
+// Destination 00000000 with RTF_GATEWAY (0x2) set, the address in the
+// kernel's byte order, little-endian on every machine Docker images are
+// built for here (amd64, arm64). "" when there is none.
+func defaultGateway(table string) string {
+	for _, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[1] != "00000000" {
+			continue
+		}
+		flags, err := strconv.ParseUint(f[3], 16, 16)
+		if err != nil || flags&0x2 == 0 {
+			continue
+		}
+		v, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil || v == 0 {
+			continue
+		}
+		ip := netip.AddrFrom4([4]byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)})
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
+}
 
 // InContainer: this magpie runs in a container (Docker, Podman, a
 // Kubernetes pod), whose image is what gets updated, not its binary.
@@ -182,19 +272,36 @@ func LANURLs() []string {
 // the other). Private ones come first: in the interfaces' order the public
 // one came first, and Settings offered it as the address under "Share on
 // local network" (the same user, asking why sharing was on the internet).
+// Of the private ones, RFC 1918's (a home or office network) come before
+// carrier-grade NAT's (Tailscale). A proxy's TUN address is left out:
+// 198.18.0.0/15 (netguard.FakeIP), which Clash, Mihomo, sing-box, Surge
+// and Stash take for their TUN interfaces and fake-ip answers, and which
+// no network hands out: no other device reaches this computer there, and
+// Settings offered http://198.18.0.1 instead of 192.168.110.x (coeo91 on
+// Discord). It goes by the address, not the interface's name: Tailscale's
+// is a utun too, and its address is reached.
 func LANHosts() []string {
-	var near, far []string
+	var home, near, far []string
 	for _, ip := range hostIPs() {
-		if ip.To4() == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		if ip.To4() == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || fakeIP(ip) {
 			continue
 		}
-		if PublicIP(ip) {
+		switch {
+		case ip.IsPrivate():
+			home = append(home, ip.String())
+		case PublicIP(ip):
 			far = append(far, ip.String())
-		} else {
+		default:
 			near = append(near, ip.String())
 		}
 	}
-	return append(near, far...)
+	return slices.Concat(home, near, far)
+}
+
+// fakeIP: ip is a proxy's TUN or fake-ip address (netguard.FakeIP).
+func fakeIP(ip net.IP) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	return ok && netguard.FakeIP(a)
 }
 
 // sharedRanges are IPv4 ranges outside RFC 1918 that still aren't the
@@ -348,6 +455,41 @@ func lanGuard(next http.Handler) http.Handler {
 			http.Error(w, "magpie isn't shared on the local network", http.StatusForbidden)
 			return
 		}
+		// a browser's preflight carries no key, and CORS forbids putting
+		// one on it: a listed origin's could never pass the key check
+		// below, so corsGuard, next, answers it (204 and the headers) with
+		// nothing behind it reached, while the call it asks after still
+		// needs the key (#4931: a preflight from another machine, direct on
+		// the LAN or behind a reverse proxy, was refused 401 for the key it
+		// may not carry, and the browser gave up before the keyed call).
+		// Any other origin's meets the key check as before: corsGuard
+		// passes some on (a page on this computer, the request's own
+		// origin, an app's scheme), and a route that takes OPTIONS
+		// (Codex's relay, the MCP paths) would serve it with no key.
+		if remote && corsPreflight(r) && corsAllowed(r.Header.Get("Origin")) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// the key page itself is the same bytes for everyone, so it is
+		// opened before the key it asks for is typed; its data isn't
+		if remote && keyPageOpen(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// a link the image server handed out opens with its own token
+		// and no key (imageTokenAsked); the handler judges the token, and
+		// refuses one that opens nothing as a request without a key
+		if remote && imageTokenAsked(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// a CI job's OIDC token traded for a key carries the token, not a
+		// key: the handler verifies it, and counts one it refuses against
+		// tooManyAuthFails (oidc_keys.go)
+		if remote && oidcExchange(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if remote || managedKey(r) {
 			var ok bool
 			r, ok = identifyCaller(w, r)
@@ -493,10 +635,25 @@ func callerGuard(next http.Handler) http.Handler {
 func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	var who access.Identity
 	ok := false
+	var refused *access.Refused
 	for _, k := range callerKeys(r) {
-		if who, ok = access.Authenticate(k); ok {
+		var err error
+		if who, err = access.Check(k); err == nil {
+			ok = true
 			break
 		}
+		if refused == nil {
+			errors.As(err, &refused)
+		}
+	}
+	if !ok && refused != nil {
+		// an expired key, or one its issuer no longer lets in, is told so
+		// on every route, from this computer too: a sandbox's agent on
+		// loopback holding a key that has run out is not let on as one
+		// with no key, which would hand it everything its key held it from
+		log.Printf("refused %s %s from %s: %s", r.Method, r.URL.Path, r.RemoteAddr, refused.Why)
+		writeError(w, provider.Chat, http.StatusUnauthorized, refused.Why)
+		return r, false
 	}
 	if !ok && !local(r) {
 		if over, retry := tooManyAuthFails(); over {
@@ -553,10 +710,14 @@ func appendUsage(r *http.Request, rec usage.Record) {
 		rec.Subagent, rec.ParentAgent = subagentOf(r.Header)
 	}
 	who := access.Caller(r.Context())
-	rec.CallerKeyID, rec.CallerKeyName = who.KeyID, who.KeyName
+	rec.CallerKeyID, rec.CallerKeyName, rec.CallerIssuerID = who.KeyID, who.KeyName, who.IssuerID()
 	rec.Local = local(r)
 	if r.Context().Value(observedKey{}) != nil {
 		rec.Watched = true
+	}
+	if !rec.IsProbe() {
+		// a request an MCP tool call made: its row names the model (mcpUse)
+		mcpUseOf(r.Context()).used(rec.Provider, rec.Model)
 	}
 	budget.Append(rec)
 }

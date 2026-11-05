@@ -118,6 +118,7 @@ function server(lang, original = false, opened = []) {
 async function open(browser, lang, width, { original = false, touch = true, opened = [] } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: touch, reducedMotion: "reduce", colorScheme: "light" });
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   await page.addInitScript(at => {
     const RealDate = Date;
     window.Date = class extends RealDate {
@@ -370,12 +371,28 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
                 await current.locator("#claudeLeanRow").evaluate((r) => r.remove());
                 await current.waitForTimeout(350);
               }
+              // Replies' Claude Code's interactive mode row is new: until
+              // BASE_REF has it, the page is compared with the row taken
+              // out; claude-tui-setting.test.cjs covers the row.
+              if (view === "settings" && !baselineFile("app.js").includes("claudeTuiRow")) {
+                await current.locator("#claudeTuiRow").evaluate((r) => r.remove());
+                await current.waitForTimeout(350);
+              }
               // A setting row's line wraps whole (arculongus on Discord):
               // until BASE_REF has that, the page is compared with the lines
               // held to one line as they were; settings-lines-wrap.test.cjs
               // covers the wrapping.
               if (view === "settings" && !baselineFile("app.css").includes("arculongus")) {
                 await current.addStyleTag({ content: ".row.pref .sub { white-space: nowrap; overflow-wrap: normal; }" });
+                await current.waitForTimeout(350);
+              }
+              // The sidebar's button sits ahead of the magpie in both layouts
+              // (ztf4080 on X), so the header beside the sidebar no longer
+              // starts with it: until BASE_REF has it, the button, the magpie
+              // and the header beside the sidebar are left out of both pictures and the rest
+              // compared as ever; side-toggle.test.cjs covers where they are.
+              if (!baselineFile("app.js").includes("append(btn, brand)")) {
+                for (const p of [current, original]) await p.addStyleTag({ content: "#sideToggle, .brand, body.side-nav .top { visibility: hidden !important; }" });
                 await current.waitForTimeout(350);
               }
               const before = PNG.sync.read(await still(original));

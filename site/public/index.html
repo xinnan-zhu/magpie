@@ -3,9 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>magpie</title>
+<title data-i18n="meta.title">magpie: one model switcher for Claude Code, Codex and Gemini CLI</title>
 <meta name="description" data-i18n-attr="content:meta.desc" content="One place to pick every agent's model. Codex on DeepSeek, Claude Code on Kimi, Gemini CLI on GLM, from the menu bar, through one local gateway.">
 <meta name="color-scheme" content="light dark">
+<!-- Google Search Console owns https://usemagpie.ai/ by this tag: keep it -->
+<meta name="google-site-verification" content="oR5FNVicy-fUTiCq8dXQNL45eoN09v5zp0zdQJeqBn0">
 <meta name="theme-color" content="#fafafa">
 <script>
 // The chosen theme (light, dark, or the system's) is on <html data-theme>
@@ -34,13 +36,16 @@ window.themeTitle = (m) => T("Theme: " + m, "主题：" + { system: "跟随系�
 <script>try{if(/Linux/.test(navigator.userAgent)&&!/Android/.test(navigator.userAgent)||localStorage.getItem("omarchy")||/[?&]omarchy=/.test(location.search))document.write('<script src="/omarchy.js"><\/script>')}catch(e){}</script>
 <link rel="icon" href="/favicon.png" type="image/png">
 <link rel="apple-touch-icon" href="/img/icon-256.png">
-<meta property="og:title" content="magpie">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="magpie">
+<meta property="og:locale" data-i18n-attr="content:meta.locale" content="en_US">
+<meta property="og:title" data-i18n-attr="content:meta.title" content="magpie: one model switcher for Claude Code, Codex and Gemini CLI">
 <meta property="og:description" data-i18n-attr="content:meta.tagline" content="Every agent’s model. One place.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:image:width" content="2400">
 <meta property="og:image:height" content="1260">
 <meta property="og:image:alt" data-i18n-attr="content:meta.ogalt" content="magpie: every agent’s model, one place">
-<meta name="twitter:title" content="magpie">
+<meta name="twitter:title" data-i18n-attr="content:meta.title" content="magpie: one model switcher for Claude Code, Codex and Gemini CLI">
 <meta name="twitter:description" data-i18n-attr="content:meta.tagline" content="Every agent’s model. One place.">
 <meta name="twitter:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" data-i18n-attr="content:meta.url" content="https://usemagpie.ai/">
@@ -51,6 +56,12 @@ window.themeTitle = (m) => T("Theme: " + m, "主题：" + { system: "跟随系�
 <link rel="alternate" hreflang="de" href="https://usemagpie.ai/de/">
 <link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+{"@type":"SoftwareApplication","@id":"https://usemagpie.ai/#app","name":"magpie","url":"https://usemagpie.ai/","description":"One place to pick every coding agent's model: Codex, Claude Code, Gemini CLI and more, through one local gateway, from the menu bar.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS 12+, Windows, Linux","downloadUrl":"https://github.com/yetone/magpie-releases/releases/latest","image":"https://usemagpie.ai/img/og.png","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"sameAs":["https://github.com/yetone/magpie"]},
+{"@type":"WebSite","@id":"https://usemagpie.ai/#site","name":"magpie","url":"https://usemagpie.ai/","inLanguage":["en","zh-CN","ja","de"]}
+]}
+</script>
 <style>
 :root {
   --bg: #fafafa;
@@ -513,6 +524,7 @@ footer a:hover { color: var(--ink); }
       <li><img src="/icons/hanako.png" alt="">OpenHanako</li>
       <li><img src="/icons/atomcode.png" alt="">AtomCode</li>
       <li><img src="/icons/snow.png" alt="">Snow CLI</li>
+      <li><img src="/icons/qwenpaw.svg" alt="">QwenPaw</li>
       <li><img src="/icons/alma.png" alt="">Alma</li>
     </ul>
     <p style="margin-top:34px" data-i18n="agents.models">Every model</p>
@@ -740,6 +752,7 @@ magpie tui                             <span class="c" data-i18n="cli.c.tui"># t
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
     <a href="https://github.com/yetone/magpie-releases/releases" data-i18n="nav.releases">Releases</a>
+    <a href="/docs/contributors" data-i18n="foot.contrib">Contributors</a>
     <a href="/api/latest" data-i18n="foot.feed">Update feed</a>
     <a href="https://x.com/yetone">@yetone</a>
   </div>

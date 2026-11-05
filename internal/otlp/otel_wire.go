@@ -50,7 +50,7 @@ func otelAttributes(r Record) []otelAttribute {
 
 func otelEnvelope(signal string, data any) map[string]any {
 	return map[string]any{"resource" + signal: []any{map[string]any{
-		"resource":       map[string]any{"attributes": []otelAttribute{otelString("service.name", "magpie")}},
+		"resource":       map[string]any{"attributes": otelResourceAttributes()},
 		"scope" + signal: []any{map[string]any{"scope": map[string]any{"name": "github.com/yetone/magpie"}, map[string]string{"Spans": "spans", "Metrics": "metrics"}[signal]: data}},
 	}}}
 }
@@ -181,7 +181,7 @@ func (e *otelExporter) traces(items []otelItem) any {
 		if generation && !r.IsRejected() {
 			if pr := priceOf(r); pr != nil {
 				// the call's tier, by its whole input, for both halves
-				f := pr.At(r.Input + r.CacheRead + r.CacheWrite)
+				f := pr.In(r.Time).At(r.Input + r.CacheRead + r.CacheWrite)
 				cost, err := json.Marshal(map[string]float64{
 					"input":  f.CostSplit(r.Input, 0, r.CacheRead, r.CacheWrite, r.CacheWrite1h),
 					"output": f.Cost(0, r.Output, 0, 0),

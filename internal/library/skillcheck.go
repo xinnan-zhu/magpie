@@ -203,6 +203,10 @@ func apiGet(u string, max int64) ([]byte, int, bool, error) {
 	if resp.StatusCode == 200 && int64(len(body)) > max {
 		return nil, resp.StatusCode, token, fmt.Errorf("GitHub's answer was over %s: %w", mb(max), errOverCap)
 	}
+	// an empty 200 kept for a 304 would answer nothing forever (#3045)
+	if resp.StatusCode == 200 && len(body) == 0 {
+		return nil, resp.StatusCode, token, fmt.Errorf("GitHub answered nothing")
+	}
 	if et := resp.Header.Get("ETag"); resp.StatusCode == 200 && et != "" && int64(len(body)) <= cacheBody {
 		etags.Lock()
 		etags.m[u] = etagged{etag: et, body: body}
@@ -219,13 +223,27 @@ func hashDir(dir string) string { return hashFiles(dir, false) }
 // a folder it shows when noFinder is set. A folder unchanged since it was
 // last hashed isn't read again (treememo.go).
 func hashFiles(dir string, noFinder bool) string {
-	return rememberedHash(dir, noFinder)
+	if noFinder {
+		return rememberedHash(dir, leaveFinder)
+	}
+	return rememberedHash(dir, leaveNothing)
 }
+
+// leave is what a hash of a skill's folder leaves aside, beyond its .git
+// and magpie's mark.
+type leave uint8
+
+const (
+	leaveNothing   leave = iota
+	leaveFinder          // .DS_Store
+	leaveBuilt           // that, and what installing dependencies builds (fromInstall)
+	leaveInstalled       // that, and the lock files an install writes again
+)
 
 // hashWalk walks dir as hashFiles reads it, stamping each file and link
 // it would hash (treememo.go); with read, it also hashes their bytes. ok
 // is false when it can't be walked, or a file can't be read.
-func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok bool) {
+func hashWalk(dir string, lv leave, read bool) (hash, stamp string, settled, ok bool) {
 	h := sha256.New()
 	st := newStamper()
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -234,6 +252,12 @@ func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok 
 		}
 		rel, _ := filepath.Rel(dir, p)
 		rel = filepath.ToSlash(rel)
+		if p != dir && lv >= leaveBuilt && fromInstall(d.Name(), d.IsDir() || d.Type()&fs.ModeSymlink != 0, lv == leaveInstalled) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		switch {
 		case d.IsDir():
 			if d.Name() == ".git" && p != dir {
@@ -249,7 +273,7 @@ func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok 
 				t, _ := os.Readlink(p)
 				fmt.Fprintf(h, "link %s %s\n", rel, filepath.ToSlash(t))
 			}
-		case d.Type().IsRegular() && rel != marker && !(noFinder && d.Name() == ".DS_Store"):
+		case d.Type().IsRegular() && rel != marker && !(lv >= leaveFinder && d.Name() == ".DS_Store"):
 			fi, err := d.Info()
 			if err != nil {
 				return err
@@ -471,7 +495,7 @@ func checkSkill(s *Skill, f *fetcher, asked map[string]*commit, limited *atomic.
 	if have == "" {
 		have = hashDir(skillDir(s.Name)) // installed before magpie kept it
 	}
-	if theirs := hashDir(from); theirs == "" || theirs != have {
+	if theirs := s.fetchedHash(from); theirs == "" || theirs != have {
 		c.Status, c.URL = "update", history
 		return c, "", ""
 	}

@@ -32,7 +32,8 @@ import (
 // (HKCU\Software\<guid>'s InstallLocation, and its Uninstall entry's
 // DisplayVersion): its installer lets the user pick another folder. more
 // are the app's other builds, each under a bundle id of its own (CodeBuddy's
-// China build beside its international one).
+// China build beside its international one). linux is the folder the
+// vendor's own Linux packages install the app to.
 type desktopApp struct {
 	id        string
 	names     []string
@@ -40,11 +41,18 @@ type desktopApp struct {
 	store     string
 	publisher string
 	guid      string
+	linux     string
 	more      []desktopApp
 }
 
 var desktopApps = map[string]desktopApp{
-	"codex": {id: "com.openai.codex", names: []string{"ChatGPT.app", "Codex.app"}, store: "OpenAI.Codex", publisher: "2p2nqsd0c76g0"},
+	// On Linux OpenAI's chatgpt package (a deb, an rpm and an Arch
+	// package, in preview since 08-11) installs the app to /usr/lib/chatgpt:
+	// ChatGPT, with its codex in resources and its version in
+	// resources/linux-package-metadata.json (26.1027.30824's deb, seen in
+	// the WSL distro magpie-desktop). Its app-server reads ~/.codex, as the
+	// CLI does (pota on Discord: no account switch for it on Linux).
+	"codex": {id: "com.openai.codex", names: []string{"ChatGPT.app", "Codex.app"}, store: "OpenAI.Codex", publisher: "2p2nqsd0c76g0", linux: "/usr/lib/chatgpt"},
 	// DeepSeek Harness Desktop (0.2.0-rc.2's DeepSeek Harness.app,
 	// com.deepseek.dsh) reads ~/.dsh as the CLI does — its own profile,
 	// profiles/desktop, beside the CLI's — and needs no CLI: its terminal
@@ -76,6 +84,19 @@ var desktopApps = map[string]desktopApp{
 	// CLI's ~/.codebuddy/models.json for models of one's own (codebuddy.go)
 	// and needs no CLI. Its Windows install folder isn't known here, so on
 	// Windows only the rule that a desktop app's folder is never gone holds.
+	// Antigravity's app (antigravity.go), not Antigravity IDE
+	// (com.google.antigravity-ide). Its Windows and Linux installs aren't
+	// known here: there the file its backend writes finds it.
+	"antigravity": {id: "com.google.antigravity", names: []string{"Antigravity.app"}},
+	// MiniMax Code Desktop (3.1.10: MiniMax Code.app, com.minimax.agent.cn
+	// from filecdn.minimax.chat, com.minimax.agent from file.cdn.minimax.io;
+	// app-identity.js) runs the mcode runtime on ~/.minimax/config.yaml, as
+	// the CLI does, and needs no CLI. Its Windows installer is
+	// electron-builder's NSIS ("MiniMax Code Setup 3.1.10.exe"), whose
+	// per-user default is %LOCALAPPDATA%\Programs\<productName>; that
+	// folder is the default's, not read from an install.
+	"minimax-code": {id: "com.minimax.agent.cn", names: []string{"MiniMax Code.app"}, win: filepath.Join("MiniMax Code", "MiniMax Code.exe"),
+		more: []desktopApp{{id: "com.minimax.agent", names: []string{"MiniMax Code.app"}}}},
 	"codebuddy": {id: "com.tencent.codebuddy", names: []string{"CodeBuddy.app"},
 		more: []desktopApp{{id: "com.tencent.codebuddycn", names: []string{"CodeBuddy CN.app"}}}},
 }
@@ -195,15 +216,67 @@ var (
 // binary one says nothing either way, and the name is the app's own).
 func macBundle(app desktopApp) bool {
 	for _, bundle := range macBundles(app) {
-		b, err := os.ReadFile(filepath.Join(bundle, "Contents", "Info.plist"))
-		if err != nil {
-			continue
-		}
-		if id := plistIDRe.FindSubmatch(b); id == nil || strings.TrimSpace(string(id[1])) == app.id {
+		info, ok := bundleInfo(bundle)
+		if ok && (!info.hasID || info.id == app.id) {
 			return true
 		}
 	}
 	return false
+}
+
+// plistInfo is what an Info.plist says of its bundle: its id and version,
+// each when it says one.
+type plistInfo struct {
+	id, version       string
+	hasID, hasVersion bool
+}
+
+// bundleInfo reads bundle's Info.plist, false when there is none. The
+// Agents page reads every desktop app's on every poll, so what a file said
+// is kept while its size and modification time stay, and a time too recent
+// to tell two writes apart is read again (racyDir).
+func bundleInfo(bundle string) (plistInfo, bool) {
+	p := filepath.Join(bundle, "Contents", "Info.plist")
+	st, err := os.Stat(p)
+	if err != nil {
+		return plistInfo{}, false
+	}
+	mod, size := st.ModTime(), st.Size()
+	plists.Lock()
+	k, ok := plists.m[p]
+	plists.Unlock()
+	if ok && k.mod.Equal(mod) && k.size == size && time.Since(mod) > racyDir {
+		return k.info, true
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return plistInfo{}, false
+	}
+	var info plistInfo
+	if id := plistIDRe.FindSubmatch(b); id != nil {
+		info.id, info.hasID = strings.TrimSpace(string(id[1])), true
+	}
+	if v := plistVersionRe.FindSubmatch(b); v != nil {
+		info.version, info.hasVersion = strings.TrimSpace(string(v[1])), true
+	}
+	plists.Lock()
+	if plists.m == nil {
+		plists.m = map[string]keptPlist{}
+	}
+	plists.m[p] = keptPlist{mod: mod, size: size, info: info}
+	plists.Unlock()
+	return info, true
+}
+
+var plists struct {
+	sync.Mutex
+	m map[string]keptPlist
+}
+
+type keptPlist struct {
+	mod  time.Time
+	size int64
+	info plistInfo
 }
 
 // macBundles are where app's bundle may be on a Mac, the likeliest first:
@@ -233,20 +306,65 @@ func inAppFolders(dirs []string, names ...string) []string {
 		for _, name := range names {
 			out = append(out, filepath.Join(dir, name))
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() || strings.HasSuffix(e.Name(), ".app") || strings.HasPrefix(e.Name(), ".") {
-				continue
-			}
+		for _, sub := range folderSubs(dir) {
 			for _, name := range names {
-				out = append(out, filepath.Join(dir, e.Name(), name))
+				out = append(out, filepath.Join(sub, name))
 			}
 		}
 	}
 	return out
+}
+
+// folderSubs are dir's folders that are no bundle, the ones inAppFolders
+// looks one level down in. Every desktop app asks on every Agents read, and
+// /Applications holds hundreds of entries, so the list is kept while dir's
+// modification time stays: adding, removing or renaming an entry changes
+// it. A time too recent to tell two changes apart is not trusted, as git
+// treats a racily clean index.
+func folderSubs(dir string) []string {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return nil
+	}
+	mod := st.ModTime()
+	appSubs.Lock()
+	k, ok := appSubs.m[dir]
+	appSubs.Unlock()
+	if ok && k.mod.Equal(mod) && time.Since(mod) > racyDir {
+		return k.subs
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var subs []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasSuffix(e.Name(), ".app") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		subs = append(subs, filepath.Join(dir, e.Name()))
+	}
+	appSubs.Lock()
+	if appSubs.m == nil {
+		appSubs.m = map[string]keptSubs{}
+	}
+	appSubs.m[dir] = keptSubs{mod: mod, subs: subs}
+	appSubs.Unlock()
+	return subs
+}
+
+// racyDir is how recent a folder's change may be for folderSubs to list it
+// again rather than trust what it kept.
+const racyDir = 2 * time.Second
+
+var appSubs struct {
+	sync.Mutex
+	m map[string]keptSubs
+}
+
+type keptSubs struct {
+	mod  time.Time
+	subs []string
 }
 
 // spotlightApps are the bundles Spotlight has with bundle id id, on a Mac;
@@ -325,21 +443,54 @@ func (app desktopApp) builds() []desktopApp {
 // say (see AppVersion).
 func (app desktopApp) version() string {
 	for _, bundle := range macBundles(app) {
-		b, err := os.ReadFile(filepath.Join(bundle, "Contents", "Info.plist"))
-		if err != nil {
+		info, ok := bundleInfo(bundle)
+		if !ok || !info.hasID || !info.hasVersion || info.id != app.id {
 			continue
 		}
-		id, v := plistIDRe.FindSubmatch(b), plistVersionRe.FindSubmatch(b)
-		if id == nil || v == nil || strings.TrimSpace(string(id[1])) != app.id {
-			continue
-		}
-		return strings.TrimSpace(string(v[1]))
+		return info.version
 	}
 	if app.store != "" {
-		return storeAppVersion(windowsStorePackages(), app.store, app.publisher)
+		if v := storeAppVersion(windowsStorePackages(), app.store, app.publisher); v != "" {
+			return v
+		}
 	}
 	if dir, v := app.registered(); dir != "" {
 		return v
+	}
+	return app.linuxVersion()
+}
+
+// linuxDir is the folder the app's Linux package installed it to, ""
+// when it isn't there. Through proc.SystemDirs, so a test binary testenv
+// isolated never reads the machine's own /usr/lib.
+func (app desktopApp) linuxDir() string {
+	if app.linux == "" {
+		return ""
+	}
+	dir := proc.SystemDirs(app.linux)[0]
+	if !isFile(filepath.Join(dir, "resources", "linux-package-metadata.json")) {
+		return ""
+	}
+	return dir
+}
+
+var linuxPackageVersionRe = regexp.MustCompile(`"version"\s*:\s*"([^"]+)"`)
+
+// linuxVersion is the version of the app's Linux package, from its
+// resources/linux-package-metadata.json ({"codexAppBrand":"chatgpt",
+// "codexBuildFlavor":"prod","version":"26.1027.30824"}); "" when it isn't
+// installed or doesn't say.
+func (app desktopApp) linuxVersion() string {
+	dir := app.linuxDir()
+	if dir == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "resources", "linux-package-metadata.json"))
+	if err != nil {
+		return ""
+	}
+	if m := linuxPackageVersionRe.FindSubmatch(b); m != nil {
+		return strings.TrimSpace(string(m[1]))
 	}
 	return ""
 }
@@ -397,7 +548,8 @@ func storeAppVersion(packages []string, name, publisher string) string {
 
 // HasApp reports whether the agent's desktop app is installed here: its
 // bundle on macOS (AppVersion), its executable on Windows: under
-// %LOCALAPPDATA%\Programs, or in the folder its installer registered.
+// %LOCALAPPDATA%\Programs, or in the folder its installer registered; on
+// Linux the folder its package installed (desktopApp.linux).
 func (a *Agent) HasApp() bool {
 	app, ok := desktopApps[a.ID]
 	return ok && a.WSL == "" && slices.ContainsFunc(app.builds(), desktopApp.installed)
@@ -405,7 +557,7 @@ func (a *Agent) HasApp() bool {
 
 // installed reports whether app is installed on this machine (see HasApp).
 func (app desktopApp) installed() bool {
-	if app.version() != "" {
+	if app.version() != "" || app.linuxDir() != "" {
 		return true
 	}
 	if app.win == "" {

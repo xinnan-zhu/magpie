@@ -23,11 +23,18 @@
 //                          a picture a plugin, market or import link names,
 //                          fetched here so its host sees Cloudflare, not the
 //                          user (the app fetches every remote icon this way)
+//   /docs/contributors, /docs/zh/contributors, /docs/ja/contributors
+//                          the contributors page, its table put in from
+//                          public/contributors/<lang>.html (credits-cli.mjs
+//                          wall, at each deploy)
 //   /download              the Apple Silicon dmg
 //   /download/mac-arm64    the same;  /download/mac-intel  the Intel dmg
 //   /download/windows      the Windows app (x64);  /download/windows-arm64
 //   /download/linux        the Linux app (x86-64); /download/linux-arm64
 //   /download/<file>       any file of the newest release, by name
+//   /r/...                 the pages' PostHog snippet, passed on to PostHog
+//                          (relay, below) so a blocker that knows its host
+//                          doesn't drop the count
 //   /docs, /docs/zh, /docs/ja  the getting-started guide: /docs/start, /docs/<lang>/start
 //   /zh/, /ja/, /de/       the home page in Chinese, Japanese, German (i18n.js);
 //                          / sends a browser that prefers one of them there,
@@ -57,6 +64,9 @@ const SHORT = {
 
 // The bare docs paths open the getting-started guide.
 const DOCS = { "/docs": "/docs/start", "/docs/zh": "/docs/zh/start", "/docs/ja": "/docs/ja/start" };
+// pages that moved, from the old path (no .html) to the new one: the MCP
+// hub was renamed the MCP router
+const MOVED = { "/docs/mcp-hub": "/docs/mcp-router", "/docs/zh/mcp-hub": "/docs/zh/mcp-router", "/docs/ja/mcp-hub": "/docs/ja/mcp-router" };
 // the languages the docs are written in besides English
 const DOC_LANGS = ["zh", "ja"];
 
@@ -117,15 +127,19 @@ export default {
       return json({ releases: pick }, 200, cacheFor(got));
     }
     if (url.pathname === "/api/icon") return icon(url.searchParams.get("url"));
+    if (url.pathname.startsWith(RELAY)) return relay(req, url);
     if (url.pathname === "/download" || url.pathname.startsWith("/download/")) {
       const want = url.pathname.split("/")[2] || "mac-arm64";
       const got = await latest(ctx, env);
       const asset = got && got.rel.assets && got.rel.assets[SHORT[want] || want];
       if (!asset) return new Response("not found\n", { status: 404 });
+      if (req.method === "GET") ctx.waitUntil(capture("magpie site download", { link: want, file: SHORT[want] || want, client: client(req), country: country(req) }));
       return Response.redirect(asset.url, 302);
     }
     const guide = DOCS[url.pathname.replace(/\/+$/, "")];
     if (guide) return Response.redirect(new URL(guide, url).toString(), 302);
+    const moved = MOVED[url.pathname.replace(/(\.html)?\/*$/, "")];
+    if (moved) return Response.redirect(new URL(moved + url.search, url).toString(), 301);
     // an English docs page, to a browser whose language has its own: as /
     // does, until a language is picked
     const doc = url.pathname.match(/^\/docs\/([a-z-]+)(\.html)?$/);
@@ -136,7 +150,7 @@ export default {
       // a page not written in that language yet stays English
       if (DOC_LANGS.includes(lang) && (await env.ASSETS.fetch(new Request(new URL(there, url), { method: "HEAD" }))).ok)
         return new Response(null, { status: 302, headers: { Location: there + url.search, ...vary } });
-      const res = beacon(await env.ASSETS.fetch(req));
+      const res = beacon(await withWall(await env.ASSETS.fetch(req), env, url));
       const out = new Response(res.body, res);
       out.headers.append("Vary", "Accept-Language, Cookie");
       out.headers.set("Cache-Control", "no-cache");
@@ -159,7 +173,9 @@ export default {
       out.headers.append("Vary", "Accept-Language, Cookie");
       return out;
     }
-    return beacon(await env.ASSETS.fetch(req));
+    if (url.pathname === "/install.sh" && req.method === "GET")
+      ctx.waitUntil(capture("magpie site install script", { client: client(req), country: country(req) }));
+    return beacon(await withWall(await env.ASSETS.fetch(req), env, url));
   },
   // the cron (wrangler.jsonc's triggers) keeps the ledger the Stable
   // channel is chosen from
@@ -236,6 +252,11 @@ function fromMagpie(to) {
   }
 }
 
+// client says whether a browser asked, or a command (curl, wget, a script).
+function client(req) {
+  return /^Mozilla\//.test(req.headers.get("User-Agent") || "") ? "browser" : "command";
+}
+
 function country(req) {
   return (req.cf && req.cf.country) || "";
 }
@@ -309,10 +330,57 @@ function translate(res, lang) {
   return rw.transform(out);
 }
 
-// beacon adds Cloudflare Web Analytics to a page. The dashboard's automatic
-// injection skips whatever a worker returns, and every page passes through
-// this one.
-const BEACON = `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "c09e76abf16b40b2aa5571c196efb847"}'></script>`;
+// relay passes a request of the pages' PostHog snippet (under RELAY) on to
+// PostHog: the library and its config from the assets host, the rest from
+// the ingestion host. The visitor's address goes as X-Forwarded-For, which
+// PostHog reads for the country, and the site's cookies stay here.
+const RELAY = "/r/";
+export async function relay(req, url) {
+  const path = url.pathname.slice(RELAY.length - 1);
+  const host = /^\/(static|array)\//.test(path) ? "us-assets.i.posthog.com" : "us.i.posthog.com";
+  const headers = new Headers(req.headers);
+  for (const h of ["Cookie", "Host"]) headers.delete(h);
+  const ip = req.headers.get("CF-Connecting-IP");
+  if (ip) headers.set("X-Forwarded-For", ip);
+  const body = req.method === "GET" || req.method === "HEAD" ? null : req.body;
+  try {
+    return await fetch(`https://${host}${path}${url.search}`, { method: req.method, headers, body, redirect: "manual" });
+  } catch {
+    return new Response("", { status: 502 });
+  }
+}
+
+// beacon adds Cloudflare Web Analytics and PostHog's Web Analytics to a page.
+// The dashboard's automatic injection skips whatever a worker returns, and
+// every page passes through this one. PostHog's requests go through RELAY
+// on this site. PostHog keeps its visitor id in
+// localStorage, never a cookie: these pages vary on Cookie (the lang
+// cookie), and a per-visitor cookie would ride on every request. It isn't
+// cookieless, since cookieless drops the address before GeoIP and the
+// country with it. It sends page views and leaves, clicks (autocapture,
+// for heatmaps, dead clicks too), Web Vitals and network timings, uncaught
+// errors, and a session recording with every input masked; the recording
+// and the rest of the project's settings come from its remote config, so
+// flags aren't turned off. Nothing is loaded under Do Not Track or Global
+// Privacy Control. Its project is the daily count's.
+const WEB_ANALYTICS = `<script>if(!(navigator.doNotTrack=="1"||window.doNotTrack=="1"||navigator.globalPrivacyControl)){!function(t,e){var o,n,p,r;e.__SV||(window.posthog&&window.posthog.__loaded)||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+" (stub)"},o="capture register unregister opt_out_capturing opt_in_capturing has_opted_out_capturing set_config".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);posthog.init("${POSTHOG_KEY}",{api_host:location.origin+"/r",ui_host:"https://us.posthog.com",persistence:"localStorage",person_profiles:"identified_only",capture_pageview:true,capture_pageleave:true,autocapture:true,enable_heatmaps:true,capture_dead_clicks:true,capture_exceptions:true,capture_performance:{web_vitals:true,network_timing:true},session_recording:{maskAllInputs:true},disable_surveys:true,respect_dnt:true})}</script>`;
+const BEACON = `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "c09e76abf16b40b2aa5571c196efb847"}'></script>` + WEB_ANALYTICS;
+
+// The contributors page: its #wall gets the table credits-cli.mjs rendered
+// for that language at deploy. Without it (a deploy that couldn't build
+// it) the page keeps the line it is written with.
+const WALL_PAGE = /^\/docs\/(?:(zh|ja)\/)?contributors(?:\.html)?$/;
+export async function withWall(res, env, url) {
+  const m = url.pathname.match(WALL_PAGE);
+  if (!m || !res.ok || !(res.headers.get("Content-Type") || "").startsWith("text/html")) return res;
+  let table = "";
+  try {
+    const got = await env.ASSETS.fetch(new Request(new URL(`/contributors/${m[1] || "en"}.html`, url)));
+    if (got.ok) table = await got.text();
+  } catch {}
+  if (!table.includes("<table")) return res;
+  return new HTMLRewriter().on("#wall", { element: (el) => el.setInnerContent(table, { html: true }) }).transform(res);
+}
 
 function beacon(res) {
   if (!(res.headers.get("Content-Type") || "").startsWith("text/html")) return res;
@@ -510,7 +578,8 @@ async function releases(ctx, env) {
 // first) and "notes:<UTC day>" each day's notes by version, which
 // /api/notes reads for a range older than the hundred newest. Without the
 // ledger, or one that doesn't reach back to the week's cut, Stable isn't
-// known and the feed says so (503) rather than guess.
+// known and the feed says so (503) rather than guess. The Docker image's
+// stable tag follows this feed (.github/workflows/docker-stable.yml).
 const DAY = 86400e3;
 const SOAK = 3 * DAY;
 const LEDGER_DAYS = 45;

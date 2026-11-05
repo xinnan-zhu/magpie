@@ -62,7 +62,11 @@ jobs:
   mirror-release:
     needs: trigger-release
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # magpie-releases' macOS jobs can wait an hour or more for a hosted
+    # runner when several tags queue: v0.1.2262 published 62 minutes after
+    # its tag, two minutes after a 60-minute wait here gave up, and it was
+    # never copied here (#4488)
+    timeout-minutes: 330
     permissions:
       contents: write
       issues: write # to say a release went out without Chinese notes
@@ -73,7 +77,7 @@ jobs:
     steps:
       - name: Wait for magpie-releases to publish every asset
         run: |
-          for i in $(seq 1 120); do
+          for i in $(seq 1 600); do
             n=$(gh release view "$REF" -R yetone/magpie-releases --json assets -q '.assets | length' 2>/dev/null || echo 0)
             echo "attempt $i: $n of $ASSETS assets"
             [ "$n" -ge "$ASSETS" ] && exit 0
@@ -104,7 +108,9 @@ jobs:
       # balance did so for v0.1.1233 to v0.1.1242, and Chinese apps showed
       # English for a day until a user said so (#2122). Its warning is in a
       # log nobody reads, so a release without them is said here, on one
-      # open issue, where the notes get added by hand.
+      # open issue. magpie-releases' notes.yml writes them again each hour
+      # once DeepSeek answers (it didn't for v0.1.2634 to 2646, a spent
+      # balance again), and notes-mirror.yml copies them here.
       - name: Say when the notes have no Chinese
         env:
           GH_REPO: ${{ github.repository }}
@@ -115,7 +121,7 @@ jobs:
             exit 0
           fi
           title="Release notes without Chinese"
-          msg="$REF went out with English notes alone: magpie-releases' release run got no Chinese from DeepSeek. Its reason is the \`DeepSeek wrote no Chinese notes\` warning in that run's Generate changelog step (https://github.com/yetone/magpie-releases/actions). Until the Chinese is added below a \`<!-- lang:zh -->\` marker, in the release on yetone/magpie-releases and here, apps set to Chinese show its notes in English (#2122)."
+          msg="$REF went out with English notes alone: magpie-releases' release run got no Chinese from DeepSeek. Its reason is the \`DeepSeek wrote no Chinese notes\` warning in that run's Generate changelog step (https://github.com/yetone/magpie-releases/actions); \`insufficient_balance_error\` means the DEEPSEEK_API_KEY account needs a top-up. Until then apps set to Chinese show its commit subjects (#2122). magpie-releases' notes.yml writes the notes again each hour once DeepSeek answers, and notes-mirror.yml copies them here; notes written by hand below a \`<!-- lang:zh -->\` marker are kept."
           n=$(gh issue list --state open --search "\"$title\" in:title" --json number,title -q ".[] | select(.title == \"$title\") | .number" | head -1) || n=""
           if [ -n "$n" ]; then
             gh issue comment "$n" --body "$msg" || echo "::warning::could not comment on #$n: $msg"

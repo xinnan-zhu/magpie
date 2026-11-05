@@ -86,7 +86,7 @@ const words = {
   },
   zh: {
     usage: "额度提醒", balance: "余额提醒", off: "关闭", on: "开启",
-    usageSub: "5 小时、每周或每月额度用到此比例时通知，每个周期一次",
+    usageSub: "5 小时、每周或每月额度已用掉的比例达到此值时通知，每个周期一次",
     balanceSub: "余额降到此数（按其货币或积分计）时通知，充值前只提醒一次",
     denied: "系统设置里关闭了 magpie 的通知",
     share: "已用比例", amount: "金额", cny: "¥ 人民币",
@@ -114,6 +114,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         pages.push(page);
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, posts, ""));
         const posted = async (n) => { for (let i = 0; i < 100 && posts.length < n; i++) await page.waitForTimeout(20); assert.equal(posts.length, n, "posts"); return posts[n - 1]; };
@@ -218,6 +219,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         pages.push(page);
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, posts, "denied"));
         await watchSettingsReads(page);

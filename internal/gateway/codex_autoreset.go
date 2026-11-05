@@ -26,7 +26,7 @@ var autoResetTimeout = 20 * time.Second
 // was and what spending did.
 func (s *Server) autoReset(ctx context.Context, cands []candidate, c candidate, held []candidate) (candidate, provider.ResetOutcome, bool) {
 	// spent before a route is begun: a wait magpie knows of (unrouted.go)
-	defer noteWait(ctx)()
+	defer noteWait(ctx, "Codex reset")()
 	for _, x := range cands {
 		if x.restKey() == c.restKey() {
 			continue

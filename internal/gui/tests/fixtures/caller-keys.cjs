@@ -30,8 +30,14 @@ function fixture(lang, theme, events, options = {}) {
   const lanPublic = () => lan && options.lanPublic ? { lanPublic: options.lanPublic } : {};
   // options.publicURL is MAGPIE_PUBLIC_URL's, offered while shared (#1551)
   const publicURL = () => lan && options.publicURL ? { publicURL: options.publicURL } : {};
+  // options.container: magpie runs in a container, and lanURLs are its
+  // own; options.containerHost is where other containers on the host
+  // reach the gateway (the host's Docker bridge address)
+  const container = () => ({ ...(lan && options.container ? { container: true } : {}),
+    ...(lan && options.containerHost ? { containerHost: options.containerHost } : {}) });
   const lanState = () => ({ lang, theme, lan,
-    lanURLs: lan ? lanURLs : [], ...lanPublic(), fx: { rate: 7.2, at: new Date().toISOString() },
+    lanURLs: lan ? lanURLs : [], ...lanPublic(), ...(container().container ? { lanContainer: true } : {}),
+    ...(container().containerHost ? { lanContainerHost: container().containerHost } : {}), fx: { rate: 7.2, at: new Date().toISOString() },
     ...(options.publicURL ? { gateway: "http://127.0.0.1:3999", ...publicURL() } : {}) });
   const rows = [
     { callerKeyId: "laptop", callerKeyName: "Laptop", in: 100, out: 10, cost: 0.1 },
@@ -64,13 +70,13 @@ function fixture(lang, theme, events, options = {}) {
       // gateway listens, as magpie's boot.js says it, and while shared the
       // addresses other machines use, MAGPIE_PUBLIC_URL with them
       ...(options.publicURL || options.bootGateway ? { sideGateway: { url: "http://127.0.0.1:3999", running: true, boot: true,
-        ...(lan ? { lan, lanURLs } : {}), ...publicURL() } } : {}) })};` });
+        ...(lan ? { lan, lanURLs } : {}), ...container(), ...publicURL() } } : {}) })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/favicon.ico") return route.fulfill({ status: 204 });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme } });
     if (url.pathname === "/api/providers") return json({
       providers: [{ id: "relay", name: "Relay", icon: "generic", models: [{ id: "m", name: "Model", on: true }], agents: [] }],
-      gateway: { running: true, window: true, mine: true, url: "http://127.0.0.1:3999", lan, lanURLs: lan ? lanURLs : [], ...lanPublic(), ...publicURL(), calls: [], groups: [] },
+      gateway: { running: true, window: true, mine: true, url: "http://127.0.0.1:3999", lan, lanURLs: lan ? lanURLs : [], ...lanPublic(), ...container(), ...publicURL(), calls: [], groups: [] },
     });
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/settings/lan") {
@@ -80,7 +86,7 @@ function fixture(lang, theme, events, options = {}) {
       let key = keys.find((k) => k.id === lanKeyID);
       if (lan && (!key || body.newKey)) {
         if (!key) {
-          key = { id: "lan-key-" + (++serial), name: "Magpie" };
+          key = { id: "lan-key-" + (++serial), name: "Magpie", lan: true };
           lanKeyID = key.id;
           keys.push(key);
         }
@@ -108,6 +114,11 @@ function fixture(lang, theme, events, options = {}) {
       { id: "relay/m", name: "Model", provider: "relay", providerName: "Relay" },
       { id: "relay/m-mini", name: "Model mini", provider: "relay", providerName: "Relay" },
       { id: "openai/gpt-5", name: "GPT-5", provider: "openai", providerName: "OpenAI" },
+      // options.deciders: decision models, which no agent lists
+      ...(options.deciders ? [
+        { id: "cf/@cf/cloudflare/clef", name: "Clef", provider: "cf", providerName: "Cloudflare", decides: true },
+        { id: "ts/jev-latest", name: "Jev", provider: "ts", providerName: "TypeSafe", decides: true },
+      ] : []),
     ], accounts: options.accounts === false ? [] : [
       { id: "relay/me@example.com", name: "me@example.com", provider: "relay", providerName: "Relay", account: true, plan: "Pro" },
       { id: "relay/spare@example.com", name: "spare@example.com", provider: "relay", providerName: "Relay", account: true },
@@ -129,10 +140,12 @@ function fixture(lang, theme, events, options = {}) {
       }
       if (action === "rename-key") k.name = body.name;
       if (action === "rotate-key") {
-        secret = "fixture-rotated-" + (++rotations);
+        // a value of the user's own, checked as access.ownSecret does
+        if (body.secret !== undefined && body.secret.trim().length < 8) return route.fulfill({ status: 400, json: { error: "Use a key between 8 and 256 characters" } });
+        secret = body.secret?.trim() || "fixture-rotated-" + (++rotations);
         secrets.set(k.id, secret);
         if (k.id === lanKeyID) lanSecret = secret;
-        k.masked = "sk-magpie-key-…" + secret.slice(-6);
+        k.masked = body.secret ? "…" + secret.slice(-4) : "sk-magpie-key-…" + secret.slice(-6);
       }
       if (action === "remove-key") keys = keys.filter((v) => v !== k);
       if (action === "on-key" || action === "off-key") k.off = action === "off-key";
@@ -169,6 +182,13 @@ function fixture(lang, theme, events, options = {}) {
       if (action === "models-key") k.models = body.models?.length ? body.models : undefined;
       if (action === "accounts-key") k.accounts = body.accounts?.length ? body.accounts : undefined;
       if (action === "quotas-key") k.quotas = body.quotas || undefined;
+      if (action === "access-key") k.readOnly = body.readOnly || undefined;
+      // a key put at a place in the list, as access.Update keeps it;
+      // options.refuseMove: the store can't be written
+      if (action === "move-key") {
+        if (options.refuseMove) return route.fulfill({ status: 500, json: { error: "There is no such place in the list of keys" } });
+        keys.splice(body.index, 0, ...keys.splice(keys.indexOf(k), 1));
+      }
       if (action === "copy-key") secret = k.id === lanKeyID ? lanSecret : secrets.get(k.id);
       return json({ keys, secret });
     }

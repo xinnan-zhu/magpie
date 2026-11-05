@@ -44,6 +44,9 @@ type Record struct {
 	ProviderAccount string `json:"providerAccount,omitempty"`
 	CallerKeyID     string `json:"callerKeyId,omitempty"`
 	CallerKeyName   string `json:"callerKeyName,omitempty"`
+	// CallerIssuerID is the key CallerKeyID was issued under (an issued,
+	// short-lived key: access.IssueKey), whose limits count this call too.
+	CallerIssuerID string `json:"callerIssuerId,omitempty"`
 	// SessionProvider is the provider ID recorded by the agent. SessionAccount
 	// identifies the session's creator, not the account used for an API request.
 	// Neither field establishes an upstream route from today's configuration.
@@ -111,8 +114,13 @@ type Record struct {
 	// native Codex call established whether a gateway row compacted.
 	Compaction *bool `json:"compaction,omitempty"`
 	// FirstReasoning is the start of paced visible reasoning, absent for hidden reasoning.
-	FirstReasoning  int64 `json:"first_reasoning_ms,omitempty"`
-	ReasoningHidden bool  `json:"reasoning_hidden,omitempty"`
+	FirstReasoning int64 `json:"first_reasoning_ms,omitempty"`
+	// ReasoningHidden: the reply reasoned and its stream doesn't tell how
+	// much — sealed or summarised, or streamed with no reasoning count in
+	// its usage (#4545: Anthropic's usage never has one), when Reasoning is
+	// 0 for unknown, not for none. A reply of no text then tells no speed
+	// (Decode).
+	ReasoningHidden bool `json:"reasoning_hidden,omitempty"`
 	// Sent: ms from the request to its answering try going out to the
 	// vendor, its body written, as TTFT is counted: magpie's own time and
 	// the tries that failed first are before it, and TTFT-Sent is how
@@ -130,8 +138,8 @@ type Record struct {
 	Own int64 `json:"own_ms,omitempty"`
 	// Masking: the ms of Own that went on masking the request (Settings
 	// → Privacy: the rules, and the local model with its wait for a
-	// turn); 0 where nothing was masked, or in a record from before it
-	// was kept.
+	// turn), all of it where Own is unknown; 0 where nothing was masked,
+	// or in a record from before it was kept.
 	Masking int64 `json:"masking_ms,omitempty"`
 	Retried int64 `json:"retried_ms,omitempty"`
 	Queued  int64 `json:"queued_ms,omitempty"`
@@ -186,6 +194,19 @@ type Record struct {
 	// index tells HandedOn from such a record's route (handedOn).
 	Tries    int  `json:"tries,omitempty"`
 	HandedOn bool `json:"handed_on,omitempty"`
+	// UpBytes is how many bytes of this call's request actually went up to
+	// the vendor on the wire, its tries summed: the plain body where it
+	// goes as read, less where it went compressed (zstd to a ChatGPT
+	// backend, provider.CodexCompressed). A try gone over a connection
+	// that then failed still counts, as a connection's own counter would,
+	// and so does a single ask's second request (RetryOneAuth …). A
+	// record from before it was kept has none (#4456).
+	UpBytes int `json:"up_bytes,omitempty"`
+	// PlainBytes is the request's last try as it went into that ask,
+	// before compression, what UpBytes would have been without one: beside
+	// it, a compressed turn's discount and a retried request's re-sends
+	// both read off the row. None when no try went out.
+	PlainBytes int `json:"plain_bytes,omitempty"`
 	// Kind is what the agent made the call for when it isn't a turn of
 	// the conversation: a Codex subagent's (review, compact, guardian…)
 	Kind string `json:"kind,omitempty"`
@@ -271,6 +292,7 @@ func Append(r Record) {
 		observeLedger(r)
 	}
 	defer codexUsedNew(r)
+	defer spentNew(r)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return
@@ -418,6 +440,34 @@ func IsAgent(id string) bool {
 	return slices.ContainsFunc(knownAgents(), func(k Known) bool { return k.ID == id || slices.Contains(k.Names, id) })
 }
 
+// libraries are the product names of HTTP libraries, runtimes and API
+// SDKs as AgentOf names a client by its User-Agent, lower-cased. A
+// request that says only one of these is from a script, or from a tool
+// built on the library, and says nothing of which: it is no agent of its
+// own (theforeveriris on X: Bun, curl and python-httpx each had an
+// agent's scorecard on the Context tab).
+var libraries = map[string]bool{
+	// command lines and API tools
+	"curl": true, "wget": true, "httpie": true, "postmanruntime": true, "insomnia": true,
+	// JavaScript
+	"bun": true, "node": true, "deno": true, "node-fetch": true, "undici": true, "axios": true, "got": true, "ky": true,
+	// Python
+	"python": true, "python-httpx": true, "httpx": true, "python-requests": true, "requests": true,
+	"python-urllib": true, "urllib3": true, "aiohttp": true,
+	// Go, JVM, Ruby, PHP, Dart, Rust
+	"go-http-client": true, "go-resty": true, "resty": true, "okhttp": true, "java": true, "java-http-client": true,
+	"apache-httpclient": true, "reactor-netty": true, "ruby": true, "faraday": true, "rest-client": true,
+	"guzzlehttp": true, "dart": true, "reqwest": true, "libcurl": true,
+	// the vendors' SDKs, which an app or a script calls a model with
+	"openai": true, "asyncopenai": true, "anthropic": true, "asyncanthropic": true, "ai-sdk": true, "google-genai-sdk": true,
+}
+
+// IsLibrary says whether a client, by the name AgentOf gives it (a
+// record's Agent, old records' too), is an HTTP library, a runtime or an
+// API SDK rather than an agent: curl, Bun, python-httpx, Go-http-client,
+// OpenAI/Python.
+func IsLibrary(id string) bool { return libraries[strings.ToLower(strings.TrimSpace(id))] }
+
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.
 func AgentOf(ua string) string {
@@ -459,13 +509,14 @@ const (
 var Periods = []Period{Today, Week, Month, All}
 
 // CostAt is what the call costs at a price: at the tier its input reaches,
-// its 1-hour cache writes at theirs. A reported call that said what it
-// cost costs that, at any price.
+// its 1-hour cache writes at theirs, and at the hour it was made (an
+// off-peak price doubles at peak, Price.In). A reported call that said
+// what it cost costs that, at any price.
 func (r Record) CostAt(p catalog.Price) float64 {
 	if r.OwnCost != nil {
 		return *r.OwnCost // a reported call's own cost (#1874)
 	}
-	return p.CostSplit(r.Input, r.Output, r.CacheRead, r.CacheWrite, r.CacheWrite1h)
+	return p.In(r.Time).CostSplit(r.Input, r.Output, r.CacheRead, r.CacheWrite, r.CacheWrite1h)
 }
 
 // Totals is a sum of calls.
@@ -614,6 +665,16 @@ func DecodeWindow(out int, ms, ttft int64) int64 {
 //     reasoning hidden from the stream (OpenAI's, Claude's omitted) comes
 //     before the first content and leaves this time short; one that
 //     streams comes at the pace its answer does.
+//   - a window under HeldWindowMs after a wait HeldShare times longer: the
+//     reply came whole in a moment after a long silence, and what it was
+//     written over is not seen (pluviophile714 on Discord: gpt-6.1-sol,
+//     392 tokens 0.25 s after an 8.2 s first token, read 1,539 tok/s where
+//     the vendor writes ~70). Its content can come spread over that moment
+//     (a relay replaying a held reply, OpenAI's answer let go after its
+//     hidden reasoning), so flow doesn't tell it. A stream as it is written
+//     takes a second or more to write a few hundred tokens; one that takes
+//     under a second is too short a sample to tell a speed by against such
+//     a wait, so a short answer after a long think tells none either.
 func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64, firstReasoning ...int64) (tokens int, w int64) {
 	start := ttft
 	if reasoning > 0 {
@@ -634,19 +695,24 @@ func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64, firstReasonin
 	if flow > 0 && flow*HeldShare < w {
 		return 0, 0
 	}
+	if w < HeldWindowMs && start > HeldShare*w {
+		return 0, 0
+	}
 	if reasoning > 0 && firstText > 0 && int64(out)*(firstText-ttft) > ThinkPace*int64(reasoning)*w {
 		return 0, 0
 	}
 	return out, w
 }
 
-// HeldShare and ThinkPace tell a reply held back and let go in a burst
-// (DecodeOf): its content came in under a quarter of its window, or its
-// answer at over 20 times the pace its reasoning came. routing/client.js's
-// decodeOf and app.js's ledDecode have the same.
+// HeldShare, ThinkPace and HeldWindowMs tell a reply held back and let go
+// in a burst (DecodeOf): its content came in under a quarter of its window,
+// its answer at over 20 times the pace its reasoning came, or its window
+// was under a second and under a quarter of the wait before it.
+// routing/client.js's decodeOf and usage/page.js's ledDecode have the same.
 const (
-	HeldShare = 4
-	ThinkPace = 20
+	HeldShare    = 4
+	ThinkPace    = 20
+	HeldWindowMs = 1000
 )
 
 // Decode is the record's DecodeOf.
@@ -975,6 +1041,18 @@ type Via struct {
 // agent id and the session's id ("codex|<id>"), the most calls first.
 func Vias(since time.Time) ViaIndex {
 	return cachedVias(since)
+}
+
+// LogVersion is a number for the log as it stands, which changes when a
+// call is written to it, and whether there is one: a synthetic log
+// (LogCalls), or one not read to its end, has none; no log yet is one. The Sessions page
+// keys an unchanged list on it.
+func LogVersion() (uint64, bool) {
+	if LogCalls != nil {
+		return 0, false
+	}
+	s := readLogSnapshot()
+	return s.version, s.info == nil || s.complete()
 }
 
 // A provider renamed since is listed by the id it has now (renames): the

@@ -61,6 +61,12 @@ func emptyRetries(w http.ResponseWriter, ctx context.Context) int {
 // than ended with the loop's error.
 const loopReasks = 1
 
+// cutReasks is how many times a try a plugin ended on its upstream's
+// stream dying mid-call (plugins#38) is asked again where it stood, before
+// the next member is (#2873): the parser reads the same, the cut doesn't
+// come again.
+const cutReasks = 1
+
 // errStreamCut ends a reply's read once its error event is in hand,
 // without waiting on a vendor that keeps the connection open after it.
 var errStreamCut = errors.New("stream cut mid-reply")
@@ -120,6 +126,13 @@ func geminiKin(actual provider.Protocol) bool {
 	return actual == provider.Gemini || actual == provider.CodeAssist
 }
 
+// commandCodeHost is Command Code's API, whose every whole reply carries
+// a finish_reason: 665 requests in a reporter's day, 624 ended with one,
+// and the 20 that didn't were turns its slow starts lost to a killed
+// worker, each a 200 with no stop its client read as "Stream ended
+// without finish_reason" (esp32gallery on #2471).
+const commandCodeHost = "api.commandcode.ai"
+
 // saysItsEnd tells whether every whole reply of p in proto, serving model,
 // says it ended, so a stream that stops short of that is a reply cut
 // short: Anthropic's message_stop, Responses' response.completed, a
@@ -132,14 +145,16 @@ func geminiKin(actual provider.Protocol) bool {
 // Discord). When the last chunk counted the reply's usage, which that API
 // sends only once its generation is done, only the finish_reason was lost
 // and it is filled in (chatTail); without it the cut is said as one.
-// Other Chat APIs may end a whole reply with neither a finish_reason nor
-// [DONE], so only a failed read is a cut there.
+// Command Code's is the same kind, its killed workers leaving the turn
+// with no closing chunk at all (esp32gallery on #2471). Other Chat APIs
+// may end a whole reply with neither a finish_reason nor [DONE], so only
+// a failed read is a cut there.
 func saysItsEnd(p provider.Provider, proto provider.Protocol, model string) bool {
 	switch {
 	case proto == provider.Anthropic, proto == provider.Responses, geminiKin(proto):
 		return true
 	case proto == provider.Chat:
-		return geminiCompat(p.Host(), model)
+		return geminiCompat(p.Host(), model) || p.Host() == commandCodeHost
 	}
 	return false
 }
@@ -200,6 +215,19 @@ func groupTry(ctx context.Context) context.Context {
 
 func inGroupTry(ctx context.Context) bool {
 	v, _ := ctx.Value(groupTryKey{}).(bool)
+	return v
+}
+
+// fallbackKey marks a try with another candidate after it: a model's next
+// account, provider or group member.
+type fallbackKey struct{}
+
+func withFallback(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fallbackKey{}, true)
+}
+
+func hasFallback(ctx context.Context) bool {
+	v, _ := ctx.Value(fallbackKey{}).(bool)
 	return v
 }
 
@@ -489,7 +517,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		if err == nil && res.StatusCode >= 400 {
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
-			failed, failedStatus = p.Explain(p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b), res.StatusCode
+			failed, failedStatus = explained(p, model, res, b), res.StatusCode
 			if cont.resume && refusesPrefill(res.StatusCode, b) {
 				// a model that takes no prefill (forwardTranslated
 				// remembers it): the reply ends with what cut it, as a
@@ -531,7 +559,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					return writeError(w, from, 502, failed), failed
 				}
 			} else {
-				dec := decoderFor(p, actual)
+				dec := carryReasoning(decoderFor(p, actual, request.Tools), from, actual)
 				attemptSee := see
 				if names := textCallNames(request.Tools); names != nil {
 					t := &textCallSee{names: names, see: see}
@@ -539,6 +567,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				}
 				ended := false // the upstream said its reply ended
 				var tail chatTail
+				var found searchTally // the searches it ran by itself
 				// the client is kept alive while the upstream says
 				// nothing at all, its first event yet to come too: the
 				// upstream's 200 is in, and a holdWriter holds what is
@@ -554,8 +583,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					defer wmu.Unlock()
 					heard()
 					tail.see([]byte(data))
+					found.see(actual, []byte(data))
 					st := upstreamStop([]byte(data))
-					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data))})
+					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data)), searches: found.count()})
 					ended = ended || replyEnds(actual, data, st)
 					if err := dec(data, attemptSee); err != nil {
 						return err

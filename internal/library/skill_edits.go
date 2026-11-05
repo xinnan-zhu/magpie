@@ -44,10 +44,15 @@ func (l *Library) takeEdits(targets []*Target, res *Result) {
 		var edits []edit
 		seen := map[string]bool{}
 		for _, t := range targets {
-			if t.Skills == "" || t.Desktop != nil || !s.gives(t.Agent.ID) {
+			if t.Skills == "" || t.Desktop != nil || t.Unreached != nil || !s.gives(t.Agent.ID) {
 				continue
 			}
 			p := filepath.Join(t.Skills, s.Name)
+			// an agent in WSL linked to magpie's copy there: an edit made
+			// through the link is in that copy (wsl_skills.go)
+			if t.Store != "" && ours(p, s.Name) && linked(p) {
+				p = filepath.Join(t.Store, s.Name)
+			}
 			if !ours(p, s.Name) || linked(p) || seen[realDir(p)] {
 				continue
 			}

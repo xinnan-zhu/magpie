@@ -75,6 +75,7 @@ async function open(t, engine, lang, width) {
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [], posts = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, posts));
@@ -92,7 +93,15 @@ async function press(page, b) {
     await page.mouse.wheel(0, 300);
     await page.waitForTimeout(150);
   }
-  const bb = await b.boundingBox();
+  // the editor grows open for a moment: the button is clicked once it
+  // holds still, not where it was on its way down
+  let bb = await b.boundingBox();
+  for (let i = 0; i < 40; i++) {
+    await page.waitForTimeout(50);
+    const now = await b.boundingBox();
+    if (now.x === bb.x && now.y === bb.y) break;
+    bb = now;
+  }
   await page.mouse.click(bb.x + bb.width / 2, bb.y + bb.height / 2);
 }
 

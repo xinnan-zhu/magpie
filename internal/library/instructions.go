@@ -1,6 +1,7 @@
 package library
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -228,6 +230,9 @@ func hash(s string) string {
 // the user edited in the file is left alone until the library's text for
 // that agent changes; then it is replaced, the file kept aside first.
 func (l *Library) syncInstructions(t *Target, b *backups, res *Result) {
+	if res.unreached(t) {
+		return
+	}
 	if t.Instructions == "" {
 		return
 	}
@@ -305,6 +310,12 @@ type AgentInstructions struct {
 	Edited   bool   `json:"edited,omitempty"`   // magpie's part was changed in the file
 	Override string `json:"override,omitempty"` // a file the agent reads instead
 	Profile  bool   `json:"profile,omitempty"`  // the file is the user's profile to the agent (Target.Profile)
+	// Asleep is the WSL distro, not running now, the agent is in: its row
+	// is what magpie last knew of it (asleepInstructions), its file isn't
+	// read, and a change is written there when the distro next runs.
+	// Unseen: magpie never saw where it keeps its instructions
+	Asleep string `json:"asleep,omitempty"`
+	Unseen bool   `json:"unseen,omitempty"`
 }
 
 // InstructionsView is the Instructions page.
@@ -331,13 +342,14 @@ func ReadInstructions() (*InstructionsView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return l.instructionsView(Targets()), nil
+	return l.instructionsView(targetsAsleep(false)), nil
 }
 
-// instructionsView is the Instructions page for these agents. They are
-// passed in: finding them looks through every agent's folders, in WSL too,
-// which one read of the Library did three times over (#1624).
-func (l *Library) instructionsView(targets []*Target) *InstructionsView {
+// instructionsView is the Instructions page for these agents, and those in
+// stopped WSL distros (asleep). They are passed in: finding them looks
+// through every agent's folders, in WSL too, which one read of the Library
+// did three times over (#1624).
+func (l *Library) instructionsView(targets []*Target, asleep []*agent.Agent) *InstructionsView {
 	v := &InstructionsView{Shared: setText(l.sharedPath()), Agents: []AgentInstructions{}}
 	for _, s := range l.sets() {
 		v.Sets = append(v.Sets, SetView{ID: s.ID, Name: s.Name, Text: setText(l.textPath(s.ID)), Active: s.ID == l.active(), File: s.File})
@@ -360,6 +372,13 @@ func (l *Library) instructionsView(targets []*Target) *InstructionsView {
 			ai.Override = t.Override
 		}
 		v.Agents = append(v.Agents, ai)
+	}
+	// a stopped WSL distro's agents, by what magpie last knew of them:
+	// nothing of theirs is opened, which would start the distro (#3896)
+	for _, a := range asleep {
+		if ai, ok := l.asleepInstructions(a); ok {
+			v.Agents = append(v.Agents, ai)
+		}
 	}
 	return v
 }
@@ -675,9 +694,15 @@ func SyncLinked() (*Result, error) {
 	return changeInstructions(func(*Library) error { return nil })
 }
 
-// KeepLinked runs SyncLinked every interval, for as long as the app runs.
-func KeepLinked(interval time.Duration) {
-	for {
+// KeepLinked runs SyncLinked, and Woken, every interval, until ctx ends:
+// the app's backend, which ends once it has handed the gateway to the
+// new version (gui/handover.go). Before, it ran for as long as the
+// process did, and the copy an update left finishing its requests went
+// on writing the agents' files beside the new one (#4938).
+func KeepLinked(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for ctx.Err() == nil {
 		if res, err := SyncLinked(); err != nil {
 			log.Println("library: linked instructions:", err)
 		} else if res != nil {
@@ -685,6 +710,11 @@ func KeepLinked(interval time.Duration) {
 				log.Println("library: linked instructions:", p.Agent, p.What, p.Error)
 			}
 		}
-		time.Sleep(interval)
+		// what was ticked for a stopped WSL distro's agents, once it runs
+		keepWoken()
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+		}
 	}
 }

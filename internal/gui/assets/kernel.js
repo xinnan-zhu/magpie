@@ -246,7 +246,6 @@
       const page = pages.get(key);
       return page ? run(page, hook, args) : undefined;
     },
-    // Built-in switches dispose resources when their page leaves the window.
     setActive(id, on) {
       const p = plugins.get(id);
       if (!p || p.active === on) return;

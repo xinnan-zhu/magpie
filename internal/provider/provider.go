@@ -30,6 +30,7 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
@@ -60,10 +61,14 @@ type Provider struct {
 	// Gave are ids it had that another provider took after it (a rename
 	// onto one, a provider added under one), each with when: the calls
 	// recorded under such an id before then were this one's (Renames).
-	Gave   []Gave `json:"gave,omitempty"`
-	Icon   string `json:"icon,omitempty"`
-	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	Gave []Gave `json:"gave,omitempty"`
+	Icon string `json:"icon,omitempty"`
+	// IconFrom is the picture's address a custom provider's Icon was
+	// fetched from in its editor, shown there again (hoobnn): only a
+	// record, never fetched again
+	IconFrom string `json:"iconFrom,omitempty"`
+	Preset   string `json:"preset,omitempty"` // preset this was created from, if any
+	Key      string `json:"key"`              // API key, as typed by the user
 
 	// AccessKeyID and SecretAccessKey are a Volcengine account's access
 	// key (TakesVolcAccessKey), what Ark tells its Coding or Agent Plan's
@@ -99,6 +104,10 @@ type Provider struct {
 	// under it, with the key in x-goog-api-key, and models under it lists
 	// them (#1346).
 	Gemini string `json:"gemini,omitempty"`
+	// GeminiFilled is that magpie filled Gemini in once, for a provider
+	// at AI Studio's OpenAI-compatible URL (aiStudioNative): a Gemini URL
+	// the user cleared after that stays empty.
+	GeminiFilled bool `json:"geminiFilled,omitempty"`
 	// Decide is the base of a decision API (TypeSafe's System One, which
 	// Jev answers), for routing groups' choices of model and effort. The
 	// provider may also serve conversations on the other endpoints.
@@ -124,8 +133,10 @@ type Provider struct {
 	// its window resets first, so less allowance is lost at reset.
 	// The window can be shorter than a week. "weight" by each key's
 	// weight, a key with 3 taking three requests to one with 1's.
-	// Whichever it is, one out of credit, out of quota, rate limited or
-	// failing is passed over for as long as that lasts.
+	// "drain" one until it is used up, then the next, which keeps them
+	// when an earlier one renews (routes.Drain). Whichever it is, one out
+	// of credit, out of quota, rate limited or failing is passed over for
+	// as long as that lasts.
 	Routing string `json:"routing,omitempty"`
 
 	// Sink sends a key or account that a 429 rate limited while it still
@@ -160,6 +171,24 @@ type Provider struct {
 	// Code's own sign-in, which magpie still moves: the gateway serves no
 	// request on them (KeptToAgent; myduso on Discord).
 	SwitchOnly bool `json:"switchOnly,omitempty"`
+	// RestartApp, on Codex's subscription, has magpie restart the Codex
+	// app's own app-server for a change it makes by itself that the app
+	// works without: the switch back once the account it moved off has
+	// room (SwitchWhenSpent), and giving Codex its account back at the
+	// reset. The ChatGPT app shows an ended app-server as an error and
+	// relaunches (#4550), so it is off unless the user turns it on
+	// (atom0964 on Discord); the app then stays on its account until it
+	// is restarted, from the switch notice or by hand. A switch the user
+	// makes, a Connect or Disconnect, and whatever leaves the app on a
+	// used-up account (a switch off it, becoming its provider for it)
+	// restart it either way: the app greys Send there (8b0132b3d).
+	RestartApp bool `json:"restartApp,omitempty"`
+	// KeepSelf, on a Remote magpie that turned out to be this magpie
+	// (SelfAnswered), keeps it in routing anyway: left alone, such a
+	// provider is left out (SelfLeftOut). It is this computer's own, as
+	// sync's copy of the provider on the other computer points at a
+	// magpie that is not that one (hanslin1666 on Discord).
+	KeepSelf bool `json:"keepSelf,omitempty"`
 
 	// MaxConcurrency is how many requests may be out at the vendor at once
 	// on each of its keys or accounts (Discord, Lemon: a Codex account is
@@ -167,11 +196,24 @@ type Provider struct {
 	// in the order they came (see Concurrency). nil follows what a
 	// plugin's provider says it takes, else none; 0 is no limit.
 	MaxConcurrency *int `json:"maxConcurrency,omitempty"`
+	// MaxAccounts is how many of its accounts or keys take requests at
+	// the same time (01huadalang on Discord: ZCode's firewall blocks the
+	// address that three of its accounts ask from at once, and two are
+	// fine). Routing goes over the first that many it would ask, in its
+	// order and not resting; the others wait as reserves until one of
+	// those rests (out of quota, rate limited, failing). nil follows what
+	// a plugin's provider says, else none; 0 is no limit (see AtOnce).
+	MaxAccounts *int `json:"maxAccounts,omitempty"`
 	// AccountConcurrency is, for one account or key, its own limit over
 	// MaxConcurrency (#892): an account by its name in lower case, a key
 	// by its KeyID; 0 there is no limit for it. One not in it takes the
 	// provider's (see LaneLimit).
 	AccountConcurrency map[string]int `json:"accountConcurrency,omitempty"`
+	// AccountWeights is, for a subscription, each account's weight under
+	// Weighted routing, by its name in lower case (rubbzha on X: a Max
+	// account and a Pro one shared by how much more one allows); one not
+	// in it weighs 1. A key's weight is its own (KeyAccount.Weight).
+	AccountWeights map[string]int `json:"accountWeights,omitempty"`
 	// QueueLimit is how many requests may wait for a slot of each key or
 	// account at once (#892); one more is turned away as the queue being
 	// full. 0 is no bound.
@@ -217,9 +259,23 @@ type Provider struct {
 	// a price the user set for one of its models stands as set. 0 is the
 	// price as listed; at most three decimals (PriceRateOK).
 	PriceRate float64 `json:"priceRate,omitempty"`
+	// CountFree is the user's word that the provider costs them nothing
+	// (jiabubu on Discord: ModelScope's free daily quota): every model of
+	// it counts as free where routing weighs that, as a model its vendor
+	// lists free does (FreeModel: Free first spends it first, Cheapest
+	// weighs it at nothing). Prices and the costs Usage counts stay as
+	// listed: it says what to spend first, not what a call cost.
+	CountFree bool `json:"countFree,omitempty"`
+	// RateWindows are the time-of-day windows it bills at its own rate
+	// (#2463): a peak at 2× or 3×, a discount off peak. The first window
+	// that holds a call's time multiplies the price again, on top of
+	// PriceRate; outside every window the price rate alone counts. At
+	// most RateWindowsMax of them (CheckRateWindows).
+	RateWindows []RateWindow `json:"rateWindows,omitempty"`
 
-	// Headers are extra HTTP request headers sent to the vendor, exactly as
-	// the user typed them. They ride on every request magpie makes to a plain
+	// Headers are extra HTTP request headers sent to the vendor, as the user
+	// typed them but for ${sessionId} and ${threadId} in a value, the
+	// request's conversation ids (SentHeaders, conversation.go). They ride on every request magpie makes to a plain
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
 	// fetches — applied after the auth headers, so the user can override those
 	// when a gateway insists on a private scheme. Signed-in agent accounts
@@ -228,9 +284,28 @@ type Provider struct {
 
 	// ExtraBody are JSON fields added to the body of every request to the
 	// vendor (#1604), filling in what the body lacks, or replacing it for a
-	// name written "!name"; ${sessionId} in a value is the conversation's
-	// id (extrabody.go). Signed-in agent accounts ignore it, as Headers.
+	// name written "!name"; ${sessionId} and ${threadId} in a value are the
+	// conversation's ids (extrabody.go, conversation.go). Signed-in agent accounts ignore it, as Headers.
 	ExtraBody ExtraBody `json:"extraBody,omitempty"`
+
+	// ReplyHeaders are headers of the vendor's reply passed on to the
+	// agent, beside DefaultReplyHeaders, whatever their case (#4145): a
+	// relay's own request id (X-Oneapi-Request-Id), for the agent's side
+	// to match with the relay's logs. Streamed or whole, an error too, on
+	// every API, translated or not; only the reply the agent is given
+	// has its headers passed on. One magpie writes itself, or that would
+	// act on magpie's address, never is (ReplyHeaderPassable).
+	ReplyHeaders []string `json:"replyHeaders,omitempty"`
+
+	// PassHeaders are headers of the agent's request passed on to the
+	// vendor as it sent them, whatever their case (3jRzfF52Qx on X): a
+	// value that changes per request or per client, which a fixed Header
+	// can't give. The client's stands over a Header of the same name;
+	// with none sent the Header goes. Every API, count_tokens, a group's
+	// member, a plugin's fetch; a signed-in account's signing has the
+	// last word. One that carries magpie's key or the connection's own
+	// never is (RequestHeaderPassable).
+	PassHeaders []string `json:"passHeaders,omitempty"`
 
 	// Searches says the vendor answers a web search tool offered on its
 	// Anthropic or Responses API by itself (web_search_20250305,
@@ -263,10 +338,15 @@ type Provider struct {
 	// additional_tools input item, as OpenAI's does: a deferred tool an
 	// Anthropic client's tool search loaded goes to it in such an item
 	// where the search loaded it, not in the top-level tools, which keeps
-	// the prompt's cached prefix (#2660). OpenAI's own API is sent one
-	// without it; another vendor isn't unless this is set, since xAI's
-	// turns the item away (#350).
+	// the prompt's cached prefix (#2660). OpenAI's own API and a ChatGPT
+	// (Codex) account are sent one without it (#4738: the ChatGPT backend
+	// takes the item where it was loaded, and its cache is kept); another
+	// vendor isn't unless this is set, since xAI's turns the item away
+	// (#350).
 	AdditionalTools bool `json:"additionalTools,omitempty"`
+	// AdditionalToolsOff, `additional-tools=off`, sends a loaded tool in
+	// the top-level tools even where magpie's default would send the item.
+	AdditionalToolsOff bool `json:"additionalToolsOff,omitempty"`
 
 	// Patience is how many seconds more a request to this provider alone,
 	// not through a group, may be kept once it has failed in a way that
@@ -316,12 +396,16 @@ type Provider struct {
 	// Azure's own APIs, which take x-api-key alone, ignore it.
 	AuthHeader string `json:"authHeader,omitempty"`
 
-	// Unredacted has requests to a provider on this machine or the local
-	// network (Ollama, LM Studio, a vLLM box) go as the agent wrote them,
-	// unmasked by Settings' redaction, which keeps secrets from vendors
-	// (lc on Discord). It is the user's word, not the address's: a relay
-	// run locally, or Ollama's cloud models, pass a request on to a vendor.
-	// See SkipsRedaction.
+	// Unredacted has requests to a provider go as the agent wrote them,
+	// unmasked by Settings' redaction, which keeps secrets from vendors:
+	// for a model on this machine or the local network (Ollama, LM Studio,
+	// a vLLM box; lc on Discord). It is the user's word, not the
+	// address's (AcMilan on Discord), on a subscription or a plugin's
+	// provider too (isee1_1 on Discord): the editor cautions while it is
+	// on for one not local, and a relay run locally, or Ollama's cloud
+	// models, pass a request on to a vendor whatever the address. A
+	// signed-in account keeps it with its model picks (withPicks). See
+	// SkipsRedaction.
 	Unredacted bool `json:"unredacted,omitempty"`
 
 	// InsecureTLS has magpie take the certificate of the provider's own
@@ -348,6 +432,11 @@ type Provider struct {
 	// an account by its name in lower case, a key by its KeyID. One not in
 	// it serves every model the provider does (see account_models.go).
 	AccountModels map[string][]string `json:"accountModels,omitempty"`
+	// AccountModelsAll is the keys, by KeyID, the user set back to every
+	// model (All models, or `accountmodels` with none): a Fetch models
+	// that ticks a key's own list for it (key_models_refresh.go) leaves
+	// these as the user set them.
+	AccountModelsAll map[string]bool `json:"accountModelsAll,omitempty"`
 	// AccountCaps is, for a subscription, the share (1–99) of its usage
 	// windows each account the user capped is used to at most, by its name
 	// in lower case: past it, routing takes the account for used up until
@@ -376,6 +465,11 @@ type Provider struct {
 	// It is magpie's own: the vendor's or plugin's sign-in never sees it
 	// (see account_names.go).
 	AccountNames map[string]string `json:"accountNames,omitempty"`
+	// KeySpendCaps is, for a provider of API keys, how much each key the
+	// user capped may spend, in USD as the Usage page prices its calls,
+	// a day, a month or in all, by its KeyID: past it, routing takes the
+	// key for used up until the period renews (see key_spend.go).
+	KeySpendCaps map[string]SpendCap `json:"keySpendCaps,omitempty"`
 
 	// BalanceURL, when set, is where the vendor tells what is left on a
 	// key, asked with the key the way a chat request carries it; BalancePath
@@ -417,6 +511,14 @@ type Provider struct {
 	// are still read and shown. Without it, no picks is the vendor's list
 	// as ever, so a file saved before it reads as it did. A pick clears it.
 	NoModels bool `json:"noModels,omitempty"`
+	// BestInFamily is the editor's Best in family (Steven on Discord): with
+	// no Models picked, of the vendor's list only the newest model of each
+	// family is served (catalog.BestInFamily), so Opus 5.6, once listed,
+	// takes Opus 5.5's place by itself. A request that names another of its
+	// models is still served, as one that names a model left unpicked is. A
+	// pick or Select none clears it (normalize); a file without it reads as
+	// the vendor's list, as before.
+	BestInFamily bool `json:"bestInFamily,omitempty"`
 	// PickedFrom are the models the vendor listed when Models were saved: one
 	// listed since is served beside picks that held every one listed then
 	// (withNewlyListed), and one listed then and left unpicked stays out.
@@ -430,6 +532,15 @@ type Provider struct {
 	// up), and the user's picks came back with it no more. Every save keeps
 	// it but for what it picks again; Select none clears it.
 	Delisted []string `json:"delisted,omitempty"`
+	// DelistedAt is when the list left out the last pick still in Models,
+	// so that every pick is in Delisted: none is served until then and
+	// pickWait after it (waitsForPicks), and the list is served as if none
+	// were picked from then on. A vendor takes a model off for good too:
+	// WorkBuddy AI's free deepseek-v4.1-flash, a Free plan account's one
+	// pick, left its list for hy3, and the account was served none
+	// (maxleebeta on Discord). Zero, while some pick is still in Models, or
+	// for picks set aside before it was kept.
+	DelistedAt time.Time `json:"delistedAt,omitzero"`
 	// RefreshEvery, for a provider of the user's own, is how often the
 	// gateway fetches its model list by itself ("6h", "1d"; none, only when
 	// asked), as Fetch models does (#2135). See autolist.go.
@@ -442,6 +553,24 @@ type Provider struct {
 	// it serves only through the routing groups it is in, and by its
 	// "provider/model" ids.
 	Unlisted bool `json:"unlisted,omitempty"`
+	// HiddenDrawers are the provider's image models the user unticked in
+	// its editor (321sssrt on X: an OpenAI key lists a dozen): left out of
+	// every list one is picked from (Settings › Images, another magpie's
+	// list, Aside's) and of Automatic's choice, as an unticked chat model
+	// is left out of the agents' lists. A deny list beside Models, not in
+	// it: Models is what agents chat with, empty meaning the vendor's list,
+	// so an image model put there would be offered to chat with, and
+	// hiding one would mean picking every chat model. A request that names
+	// one still draws with it, and so does the one Settings › Images
+	// names: a hidden pick is shown as picked, and said to be hidden.
+	HiddenDrawers []string `json:"hiddenDrawers,omitempty"`
+	// HiddenVideomakers are its video models unticked in its editor, as
+	// HiddenDrawers are its image models (axelburks on Discord: a
+	// Volcengine Ark key lists a dozen Seedance models): left out of
+	// what lists video models to pick from (generate_video's, another
+	// magpie's, /v1/models' ?kind=video) and of Automatic's choice. A
+	// request that names one still makes its video.
+	HiddenVideomakers []string `json:"hiddenVideomakers,omitempty"`
 	// Off switches the provider off without removing it: its keys and
 	// settings stay, but agents aren't given its models, no request,
 	// routing group or fallback goes to it, and its balance isn't asked,
@@ -495,6 +624,11 @@ type file struct {
 	// NoAutoGroups: the user turned off the groups magpie finds on its
 	// own (SetAutoGroups); the groups they made or changed stay.
 	NoAutoGroups bool `json:"noAutoGroups,omitempty"`
+	// AutoGroupSkip are the providers, by id, the user keeps out of the
+	// groups magpie finds (SetAutoGroupSkip; chenxiang0010 on Discord):
+	// their models are in none, so a model only one other provider serves
+	// is no group. The groups the user made or changed keep them.
+	AutoGroupSkip []string `json:"autoGroupSkip,omitempty"`
 	// Order is the order the user put the providers in on the Providers
 	// tab (#499), by id; one not in it follows those that are, in the
 	// order it was added (see SetOrder).
@@ -513,7 +647,7 @@ type file struct {
 }
 
 // Path is the file the user's providers live in.
-func Path() string { return filepath.Join(appdir.Config(), "providers.json") }
+func Path() string { return appdir.Join(appdir.Config(), "providers.json") }
 
 // load is the file for a read that goes on without it: start-up, the
 // gateway, the catalog. One that can't be read is taken as empty there;
@@ -522,6 +656,28 @@ func Path() string { return filepath.Join(appdir.Config(), "providers.json") }
 func load() file {
 	f, _ := read()
 	return f
+}
+
+// storedFile is load for a read that changes nothing, parsed once until the
+// file changes: the gateway asked for one provider's proxy (storedPicks)
+// and whether it is left alone (leftAlone) for each request and each
+// background look, each a parse of the whole file, 3.6 GB of a live
+// magpie's 33 GB in 53 minutes. What it returns is shared: the caller
+// must not change it, nor a list or map in it.
+func storedFile() file {
+	f, err := filememo.Read("providers", Path(), parseProviders)
+	if err != nil {
+		// missing, or a file that doesn't decode: read's own way, its
+		// last good generation
+		return load()
+	}
+	return f
+}
+
+func parseProviders(b []byte) (file, error) {
+	var f file
+	err := json.Unmarshal(bytes.TrimPrefix(b, utf8BOM), &f)
+	return f, err
 }
 
 // ErrUnreadable is a providers.json that is there but can't be read or
@@ -672,7 +828,7 @@ func All() []Provider {
 	// round every 30s), most of an idle magpie's CPU (xsw on Discord)
 	off := sync.OnceValue(func() bool { return settings.AccountDiscoveryOffIn(heldSettings()) })
 	for _, p := range held {
-		if p.Account != nil && off() {
+		if p.Account != nil && off() && !p.publicAccount() {
 			continue
 		}
 		out = append(out, p.clone()) // callers change theirs, Keys[i] and Headers included
@@ -692,9 +848,12 @@ func (p Provider) clone() Provider {
 	p.AutoInclude = slices.Clone(p.AutoInclude)
 	p.Headers = maps.Clone(p.Headers)
 	p.ExtraBody = maps.Clone(p.ExtraBody)
+	p.ReplyHeaders = slices.Clone(p.ReplyHeaders)
+	p.PassHeaders = slices.Clone(p.PassHeaders)
 	p.AccountProxies = maps.Clone(p.AccountProxies)
 	p.AccountCaps = maps.Clone(p.AccountCaps)
 	p.AccountNames = maps.Clone(p.AccountNames)
+	p.KeySpendCaps = maps.Clone(p.KeySpendCaps)
 	if p.AccountWindowCaps != nil {
 		m := make(map[string]map[string]int, len(p.AccountWindowCaps))
 		for k, v := range p.AccountWindowCaps {
@@ -703,7 +862,9 @@ func (p Provider) clone() Provider {
 		p.AccountWindowCaps = m
 	}
 	p.AccountConcurrency = maps.Clone(p.AccountConcurrency)
+	p.AccountWeights = maps.Clone(p.AccountWeights)
 	p.Contexts = maps.Clone(p.Contexts)
+	p.AccountModelsAll = maps.Clone(p.AccountModelsAll)
 	if p.AccountModels != nil {
 		m := make(map[string][]string, len(p.AccountModels))
 		for k, v := range p.AccountModels {
@@ -714,6 +875,10 @@ func (p Provider) clone() Provider {
 	if p.MaxConcurrency != nil {
 		v := *p.MaxConcurrency
 		p.MaxConcurrency = &v
+	}
+	if p.MaxAccounts != nil {
+		v := *p.MaxAccounts
+		p.MaxAccounts = &v
 	}
 	if p.ZhipuTeam != nil {
 		v := *p.ZhipuTeam
@@ -771,33 +936,73 @@ func ownOf(f file) (own []Provider, picks map[string]Provider) {
 // the provider keeps the same settings (#1899: a second WorkBuddy AI
 // account queued 62s with the wait set to 1s).
 func withPicks(a, pk Provider) Provider {
-	a.PickedFrom, a.Delisted = pk.PickedFrom, pk.Delisted
+	return accountSettings(a, pk)
+}
+
+// accountSettings is a with every setting a signed-in account keeps in
+// providers.json taken from pk. It is the one list both ways go through:
+// Save writes what it copies, and withPicks reads the same back. Two lists
+// drifted apart, and a setting on one alone was lost: #4738's
+// additional-tools=on on a Codex account was on neither, PaulT's price
+// rate on neither, an account's extraBody and reply headers were read
+// back but never written, and its rests out of quota and after failures
+// written but never read back.
+func accountSettings(a, pk Provider) Provider {
+	a.PickedFrom, a.Delisted, a.DelistedAt = pk.PickedFrom, pk.Delisted, pk.DelistedAt
 	a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.KeepLoginAs, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.KeepLoginAs, pk.Contexts, pk.Family
-	a.SwitchOnly = pk.SwitchOnly
-	a.Sink, a.NoModels = pk.Sink, pk.NoModels
+	a.SwitchOnly, a.RestartApp = pk.SwitchOnly, pk.RestartApp
+	a.Sink, a.NoModels, a.BestInFamily = pk.Sink, pk.NoModels, pk.BestInFamily
 	a.NativeCompaction = pk.NativeCompaction
 	a.PromptAsWritten = pk.PromptAsWritten
-	a.Proxy, a.AccountProxies, a.AccountModels = pk.Proxy, pk.AccountProxies, pk.AccountModels
+	// a deferred tool a tool search loaded goes where it was loaded, set
+	// with `magpie provider set <id> additional-tools=on` (#2660, #4738)
+	a.AdditionalTools, a.AdditionalToolsOff = pk.AdditionalTools, pk.AdditionalToolsOff
+	// Send requests unmasked, the user's for a subscription and a
+	// plugin's provider too (isee1_1 on Discord)
+	a.Unredacted = pk.Unredacted
+	a.Proxy, a.AccountProxies, a.AccountModels, a.AccountModelsAll = pk.Proxy, pk.AccountProxies, pk.AccountModels, pk.AccountModelsAll
 	a.AccountCaps, a.AccountWindowCaps = pk.AccountCaps, pk.AccountWindowCaps
 	a.CapStop, a.CapCareful = pk.CapStop, pk.CapCareful
 	a.AccountNames = pk.AccountNames
 	a.MaxConcurrency, a.PinUpstream = pk.MaxConcurrency, pk.PinUpstream
+	a.MaxAccounts = pk.MaxAccounts
 	a.AccountConcurrency, a.QueueLimit, a.QueueWait = pk.AccountConcurrency, pk.QueueLimit, pk.QueueWait
+	a.AccountWeights = pk.AccountWeights
 	a.MaxRPM = pk.MaxRPM
-	// and what it bills against the official price (#819): an account's
-	// editor sets it as a key provider's does (PaulT on Discord, Codex)
+	// how long a request to it alone is kept while it is busy
+	a.Patience = pk.Patience
+	// how long its accounts rest out of quota, and the most they rest
+	// while they keep failing (#2008); or not at all for a limit
+	a.QuotaRest, a.QuotaResetAt, a.RestCap, a.LimitRestOff = pk.QuotaRest, pk.QuotaResetAt, pk.RestCap, pk.LimitRestOff
+	// what it bills against the official price (#819): an account's editor
+	// sets it as a key provider's does (PaulT on Discord, Codex)
 	a.PriceRate = pk.PriceRate
+	// counted free by the user's word, every account alike
+	a.CountFree = pk.CountFree
+	// the hours the provider bills at its own rate (#2463), as the editor
+	// keeps them for the account like the rest of these
+	a.RateWindows = pk.RateWindows
 	// the extra body fields written for it, which a ChatGPT account's
 	// requests take (WithExtraBody, magpie-releases#18)
 	a.ExtraBody = pk.ExtraBody
+	// the image models unticked in its editor (HiddenDrawers)
+	a.HiddenDrawers = pk.HiddenDrawers
+	a.HiddenVideomakers = pk.HiddenVideomakers
+	// and the headers of its replies passed on (#4145)
+	a.ReplyHeaders = pk.ReplyHeaders
+	// and the headers of the agent's requests passed on
+	a.PassHeaders = pk.PassHeaders
 	return a
 }
 
-// Hidden lists the signed-in accounts the user removed from magpie.
+// Hidden lists the signed-in accounts the user removed from magpie. The
+// file is read once, as parsed until it changes: a parse of it for each
+// account was 68 MB of the Providers page's 1.4 GB in twenty loads.
 func Hidden() []Provider {
 	var out []Provider
+	saved := storedFile().Providers
 	for _, a := range Accounts() {
-		for _, p := range load().Providers {
+		for _, p := range saved {
 			if p.ID == a.ID && p.Hidden {
 				a.Quiet, a.Tucked = p.Quiet, p.Tucked
 				out = append(out, a)
@@ -879,6 +1084,10 @@ func Save(p Provider) error {
 	}
 	p = normalize(p)
 	p.IconURL = "" // import-only: never stored
+	// where a picture came from goes only with that picture
+	if p.IconFrom = strings.TrimSpace(p.IconFrom); !strings.HasPrefix(p.Icon, iconPrefix) {
+		p.IconFrom = ""
+	}
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
@@ -917,7 +1126,7 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, NoModels: p.NoModels, PickedFrom: p.PickedFrom, Delisted: p.Delisted, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, CapStop: p.CapStop, CapCareful: p.CapCareful, AccountNames: p.AccountNames, MaxConcurrency: p.MaxConcurrency, AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, PriceRate: p.PriceRate, QuotaRest: p.QuotaRest, QuotaResetAt: p.QuotaResetAt, RestCap: p.RestCap, PinUpstream: p.PinUpstream, NativeCompaction: p.NativeCompaction, PromptAsWritten: p.PromptAsWritten, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
+		p = accountSettings(Provider{ID: p.ID, Key: key, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}, p)
 	} else {
 		p.AccountProxies = keyProxies(p) // a provider of keys proxies each key apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
@@ -955,6 +1164,7 @@ func Save(p Provider) error {
 	}
 	p.PickedFrom = listedWith(p, was)
 	p.Delisted = delistedWith(p, was)
+	p.DelistedAt = delistedAtWith(p, was)
 	if was != nil {
 		if p.Was == nil {
 			p.Was = was.Was
@@ -1016,6 +1226,19 @@ func delistedWith(p Provider, was *Provider) []string {
 	return d
 }
 
+// delistedAtWith is what p.DelistedAt is saved as: zero while some pick is
+// in Models or none is set aside; else p's, or what was kept before when p
+// has none, as a save of another setting keeps the wait going.
+func delistedAtWith(p Provider, was *Provider) time.Time {
+	if len(p.Models) > 0 || len(p.Delisted) == 0 {
+		return time.Time{}
+	}
+	if p.DelistedAt.IsZero() && was != nil {
+		return was.DelistedAt
+	}
+	return p.DelistedAt
+}
+
 // listedWith is what p.PickedFrom is saved as: none without picks; what was
 // kept with the picks when they are the same picks; and the models listed
 // now when the picks are new, as the user picked them from that list. While
@@ -1024,17 +1247,24 @@ func delistedWith(p Provider, was *Provider) []string {
 // left unpicked isn't new when the list that left it out for a while has it
 // again (an Our Free Model channel not read yet when the picks were saved).
 // A list short of no pick is taken as it is: what it left out and lists
-// again later is new (TestClaudePicksOfEveryModelTakeOnesListedSince).
+// again later is new (TestClaudePicksOfEveryModelTakeOnesListedSince). A
+// provider of keys saved before PickedFrom was kept is given it at its next
+// Save, the same picks too, as withNewlyListed serves those picks as they
+// are until it has one (TestLegacyPicksOfEveryModelGetPickedFromAtSave).
 func listedWith(p Provider, was *Provider) []string {
 	if len(p.Models) == 0 {
 		return nil
 	}
-	if was != nil && slices.Equal(normalModels(was.Models), normalModels(p.Models)) {
+	same := was != nil && slices.Equal(normalModels(was.Models), normalModels(p.Models))
+	if same && was.PickedFrom != nil {
 		return was.PickedFrom
 	}
 	from := p
 	if q, err := Find(p.ID); err == nil {
 		from = *q // with its account, whose list it is
+	}
+	if same && (from.Account != nil || p.Account != nil) {
+		return was.PickedFrom // a subscription keeps the date rule
 	}
 	var ids []string
 	for _, m := range from.Available() {
@@ -1069,11 +1299,15 @@ func add(p Provider, once bool) (string, error) {
 		// nothing: the id is the site's instead
 		p.ID = hostID(p)
 	}
-	// the same key on the same host with the same headers is the one
-	// already here, not another: adding it twice would only split its usage.
-	// A copy the user asked for is taken (AddCopy).
+	// the same key on the same host with the same headers, at the same
+	// addresses, is the one already here, not another: adding it twice
+	// would only split its usage. One key a relay takes in both formats,
+	// added once for its OpenAI API and once for its Anthropic API, is two
+	// providers the user asked for (energetic_wolf_99424 on Discord: the
+	// second was refused as the key already used). A copy the user asked
+	// for is taken (AddCopy).
 	for _, h := range All() {
-		if once && h.Account == nil && sameProvider(h, normalize(p)) {
+		if once && h.Account == nil && sameProvider(h, normalize(p)) && servesAll(h, normalize(p)) {
 			return "", fmt.Errorf("%s is already added with that key (%s); magpie provider key %s <key> changes its key", h.Name, h.ID, h.ID)
 		}
 	}
@@ -1086,6 +1320,17 @@ func add(p Provider, once bool) (string, error) {
 		CountPartner(PartnerAdded, p.Preset)
 	}
 	return p.ID, nil
+}
+
+// servesAll says h is asked at every address p is added with, each for the
+// same API: p brings no API, and no address of one, that h lacks.
+func servesAll(h, p Provider) bool {
+	for _, u := range [][2]string{{h.Chat, p.Chat}, {h.Responses, p.Responses}, {h.Anthropic, p.Anthropic}, {h.Gemini, p.Gemini}} {
+		if u[1] != "" && u[0] != u[1] {
+			return false
+		}
+	}
+	return true
 }
 
 // AddCopy adds p, a copy the user made of the provider from (#268), beside
@@ -1126,8 +1371,15 @@ func AddCopy(p Provider, from string) (string, error) {
 		p.Fallback = slices.Clone(src.Fallback)
 	}
 	p.Unlisted = p.Unlisted || src.Unlisted
+	if p.HiddenDrawers == nil {
+		p.HiddenDrawers = slices.Clone(src.HiddenDrawers)
+	}
+	if p.HiddenVideomakers == nil {
+		p.HiddenVideomakers = slices.Clone(src.HiddenVideomakers)
+	}
 	p.Searches = p.Searches || src.Searches
 	p.Unredacted = p.Unredacted || src.Unredacted
+	p.CountFree = p.CountFree || src.CountFree
 	p.NativeCompaction = p.NativeCompaction || src.NativeCompaction
 	p.PassUserAgent = p.PassUserAgent || src.PassUserAgent
 	if p.Website == "" {
@@ -1363,11 +1615,16 @@ func normalize(p Provider) Provider {
 	p.Proxy = strings.TrimSpace(p.Proxy)
 	p.AccountProxies = normalAccountProxies(p.AccountProxies)
 	p.AccountModels = normalAccountModels(p.AccountModels)
+	p.AccountModelsAll = normalModelsAll(p.AccountModelsAll, p.AccountModels)
 	p.AccountCaps = normalAccountCaps(p.AccountCaps)
 	p.AccountWindowCaps = normalWindowCaps(p.AccountWindowCaps)
 	p.AccountNames = normalAccountNames(p.AccountNames)
+	p.KeySpendCaps = normalKeySpendCaps(p.KeySpendCaps)
 	if len(p.Models) > 0 {
 		p.NoModels = false // a pick is no longer Select none
+	}
+	if len(p.Models) > 0 || p.NoModels {
+		p.BestInFamily = false // nor Best in family
 	}
 	p.ZhipuTeam = p.ZhipuTeam.normal()
 	p.Vertex = p.Vertex.Normal()
@@ -1400,6 +1657,7 @@ func normalize(p Provider) Provider {
 		}
 	}
 	p.Gemini = GeminiBase(p.Gemini)
+	p.aiStudioNative()
 	// a pick whose URL is gone (cleared from the CLI) is no pick
 	if p.BaseAPI != "" && p.baseOf(p.BaseAPI) == "" {
 		p.BaseAPI = ""
@@ -1414,6 +1672,9 @@ func normalize(p Provider) Provider {
 	if a, ok := presetAliases[p.Preset]; ok {
 		p.Preset = a.preset
 	}
+	// a preset's endpoints its vendor has moved since (Tencent Cloud's
+	// Token Plan 个人版, ysm119) are where they are now
+	p.moveEndpoints()
 	// OpenCode Zen serves its free models (-free) signed out, to the key
 	// OpenCode itself sends then: a Zen provider saved with no key of its
 	// own asks with that one
@@ -1434,7 +1695,7 @@ func normalize(p Provider) Provider {
 	if (p.Preset == OMLXPreset || p.Preset == MLXServePreset || p.Preset == "ollama" || p.Preset == "ollama-cloud") && p.Decide == "" && p.Chat != "" {
 		p.Decide = p.Chat
 	}
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace && p.Routing != Weighted && p.Routing != FreeFirst && p.Routing != Fastest && !PluginRouting(p.Routing) {
+	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace && p.Routing != Weighted && p.Routing != FreeFirst && p.Routing != Fastest && p.Routing != Drain && !PluginRouting(p.Routing) {
 		p.Routing = ""
 	}
 	if !slices.Contains(Affinities, p.Affinity) {
@@ -1446,7 +1707,12 @@ func normalize(p Provider) Provider {
 	if p.MaxConcurrency != nil && *p.MaxConcurrency < 0 {
 		p.MaxConcurrency = new(int)
 	}
+	if p.MaxAccounts != nil {
+		v := min(max(*p.MaxAccounts, 0), MaxLimit)
+		p.MaxAccounts = &v
+	}
 	p.AccountConcurrency = normalAccountConcurrency(p.AccountConcurrency)
+	p.AccountWeights = normalAccountWeights(p.AccountWeights)
 	p.QueueLimit, p.QueueWait = min(max(p.QueueLimit, 0), MaxQueueLimit), min(max(p.QueueWait, 0), MaxQueueWait)
 	p.MaxRPM = min(max(p.MaxRPM, 0), MaxRPMLimit)
 	p.QuotaRest = min(max(p.QuotaRest, 0), MaxQuotaRest)
@@ -1474,6 +1740,8 @@ func normalize(p Provider) Provider {
 	// endpoints and catalog, the headers say which workspace or app it is
 	p.Headers = cleanHeaders(p.Headers)
 	p.ExtraBody = cleanExtraBody(p.ExtraBody)
+	p.ReplyHeaders = cleanReplyHeaders(p.ReplyHeaders)
+	p.PassHeaders = cleanRequestHeaders(p.PassHeaders)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -1531,10 +1799,65 @@ func cleanHeaders(h map[string]string) map[string]string {
 			out[k] = strings.TrimSpace(v)
 		}
 	}
+	out = userIDHeader(out)
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// userIDHeader is h with a header named by digits alone and no value
+// read as the new-api user id it is, New-Api-User: the user id typed in
+// a header's name box, where magpie's old hint asked for a header
+// (zxc56823 on Discord, "272298" with its value left empty). Sent as it
+// was, the relay is told a header it never reads and still no user. One
+// with a New-Api-User of its own already has it; the digits are dropped.
+// h itself when it has none.
+func userIDHeader(h map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range h {
+		if strings.TrimSpace(v) != "" || !allDigits(strings.TrimSpace(k)) {
+			continue
+		}
+		if out == nil {
+			out = maps.Clone(h)
+		}
+		delete(out, k)
+		has := false
+		for n, w := range out {
+			if strings.EqualFold(n, NewAPIUserHeader) && strings.TrimSpace(w) != "" {
+				has = true
+			}
+		}
+		if !has {
+			for n := range out {
+				if strings.EqualFold(n, NewAPIUserHeader) {
+					delete(out, n)
+				}
+			}
+			out[NewAPIUserHeader] = strings.TrimSpace(k)
+		}
+	}
+	if out == nil {
+		return h
+	}
+	return out
+}
+
+// NewAPIUserHeader is where a new-api relay's /api/user/self wants the
+// user's id, beside the access token.
+const NewAPIUserHeader = "New-Api-User"
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func contains(xs []string, x string) bool {
@@ -1580,6 +1903,11 @@ func (p Provider) Base(proto Protocol) string {
 	case Responses:
 		return p.Responses
 	case Anthropic:
+		// Vertex AI's Claude models, on Anthropic's Messages API at the
+		// project, each at a path of its own (VertexClaudeRequest)
+		if p.IsVertex() {
+			return p.vertexBase()
+		}
 		return p.Anthropic
 	case CodeAssist:
 		if p.Account != nil {
@@ -1599,36 +1927,47 @@ func (p Provider) Base(proto Protocol) string {
 	return ""
 }
 
+// speaksLooked counts Speaks' looks, for a test.
+var speaksLooked atomic.Int64
+
 // Speaks lists the protocols the vendor serves natively, preferred first.
 func (p Provider) Speaks() []Protocol {
+	speaksLooked.Add(1)
+	return slices.Collect(p.speaking)
+}
+
+// speaking is Speaks one protocol at a time, for a look that wants only
+// the first (Host): a list built for it was 8 MB of what twenty polls of
+// the Providers page allocated with real accounts.
+func (p Provider) speaking(yield func(Protocol) bool) {
 	// a Google sign-in speaks Code Assist, and only that
 	if p.Account != nil && p.Account.codeAssist != "" && !p.IsPlugin() {
-		return []Protocol{CodeAssist}
+		yield(CodeAssist)
+		return
 	}
-	var out []Protocol
 	for _, pr := range Protocols {
-		if p.Base(pr) != "" {
-			out = append(out, pr)
+		if p.Base(pr) != "" && !yield(pr) {
+			return
 		}
 	}
 	// a plugin's Gemini models, beside what else it serves
-	if p.IsPlugin() && p.Account.codeAssist != "" {
-		out = append(out, CodeAssist)
+	if p.IsPlugin() && p.Account.codeAssist != "" && !yield(CodeAssist) {
+		return
 	}
 	// Factory's Gemini models, on generateContent. A model droid didn't
 	// list stays on the other three (factoryAPIs); this is not one of them.
 	// A custom provider's Gemini API comes after the others it has.
 	// Vertex AI's Gemini models, on generateContent at its project, after
-	// the chat completions its partner models are served on (ListedAPIs
-	// gives each model its one).
+	// the chat completions its partner models are served on and the
+	// Messages API its Claude models are (ListedAPIs gives each model its
+	// one).
 	if p.IsVertex() {
 		if p.vertexBase() != "" {
-			out = append(out, Gemini)
+			yield(Gemini)
 		}
 	} else if p.FactoryGemini() || p.Gemini != "" {
-		out = append(out, Gemini)
+		yield(Gemini)
 	}
-	return out
 }
 
 // FactoryGemini is Factory's sign-in, whose Gemini models are asked on its
@@ -1721,7 +2060,8 @@ func openAIModel(model string) bool {
 // the model on itself, so a request on it is relayed as it is rather than
 // translated — Responses for a ChatGPT sign-in, or an OpenAI model on
 // OpenAI's API or Copilot's; Anthropic's Messages for a Claude model
-// where that is served; Chat where that is served. "" when every
+// where that is served; the API a custom provider's Base URL was given as
+// (BaseAPI); Chat where that is served. "" when every
 // request is translated anyway: a sign-in served through its agent's own
 // API (Claude Code's binary, Devin, Code Assist).
 func (p Provider) Native(model string) Protocol {
@@ -1747,6 +2087,13 @@ func (p Provider) Native(model string) Protocol {
 	if p.MessagesFirst(model) && slices.Contains(out, Anthropic) {
 		return Anthropic
 	}
+	// the API the user gave a custom provider's Base URL as, where it
+	// serves the model: a relay whose Chat URL was found beside it (Detect
+	// sets every API that answers) is still the Responses one they picked
+	// (nb5p on Discord: dsh, Pi and droid asked its GPTs on Chat)
+	if pr := Protocol(p.BaseAPI); pr != "" && slices.Contains(out, pr) {
+		return pr
+	}
 	return out[0]
 }
 
@@ -1755,7 +2102,7 @@ func (p Provider) Host() string {
 	if p.Account != nil && p.Account.moved {
 		return p.Account.wasHost // not plugin://<id>
 	}
-	for _, pr := range p.Speaks() {
+	for pr := range p.speaking {
 		if u := p.Base(pr); u != "" {
 			return HostOf(u)
 		}
@@ -1783,8 +2130,23 @@ func (p Provider) Where() string {
 // IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
 // which routes and caches by conversation and turns away requests that do
 // not name one in x-opencode-session.
-func (p Provider) IsOpenCode() bool {
-	return OpenCodeURL("//" + p.Host()) // its port, if it names one, aside
+func (p Provider) IsOpenCode() bool { return openCodeAt(p.Host()) }
+
+// openCodeAt is OpenCodeURL for a host as Host gives it, its port and
+// any user aside, read without parsing a URL: the providers' page asks
+// IsOpenCode for each model, and url.Parse there was 7 MB of what twenty
+// window polls allocated.
+func openCodeAt(h string) bool {
+	if i := strings.LastIndexByte(h, '@'); i >= 0 {
+		h = h[i+1:]
+	}
+	if strings.HasPrefix(h, "[") {
+		return false // an IPv6 address
+	}
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
+	return openCodeHost(h)
 }
 
 // IsBedrock reports whether the provider is Amazon Bedrock: its runtime
@@ -1923,9 +2285,10 @@ func (p Provider) Ready() bool {
 	return p.Account != nil || p.Key != "" || keyOptional(p)
 }
 
-// On is whether the provider takes requests: ready, not switched off and
-// not kept to its agent's own sign-in (KeptToAgent).
-func (p Provider) On() bool { return p.Ready() && !p.Off && !p.KeptToAgent() }
+// On is whether the provider takes requests: ready, not switched off,
+// not kept to its agent's own sign-in (KeptToAgent) and not a Remote
+// magpie that is this magpie (SelfLeftOut).
+func (p Provider) On() bool { return p.Ready() && !p.Off && !p.KeptToAgent() && !p.SelfLeftOut() }
 
 // KeptToAgent is whether the provider is Claude's subscription with
 // SwitchOnly on: its accounts are Claude Code's own sign-in alone, which
@@ -1955,12 +2318,12 @@ func SetOff(id string, off bool) error {
 func SwitchedOff(id string) (Provider, bool) {
 	id = strings.TrimSuffix(strings.TrimSpace(id), "[1m]")
 	if pid, _, ok := strings.Cut(id, "/"); ok {
-		if p, err := Find(pid); err == nil && (p.Off || p.KeptToAgent()) {
+		if p, err := Find(pid); err == nil && (p.Off || p.KeptToAgent() || p.SelfLeftOut()) {
 			return *p, true
 		}
 	}
 	for _, p := range All() {
-		if !p.Off && !p.KeptToAgent() || !p.Ready() {
+		if !p.Off && !p.KeptToAgent() && !p.SelfLeftOut() || !p.Ready() {
 			continue
 		}
 		if slices.ContainsFunc(p.Exposed(), func(m catalog.Model) bool { return m.ID == id }) {

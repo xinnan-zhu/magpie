@@ -156,3 +156,19 @@ func TestSSHBridgeScopesExactAndRemappedTools(t *testing.T) {
 		t.Fatal("trusted SSH context became local")
 	}
 }
+
+func TestSSHMachineKeyRefusedOnOrdinaryLoopback(t *testing.T) {
+	fresh(t)
+	key, err := access.NewMachineKey("SSH fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "http://127.0.0.1/v1/models", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.Header.Set("Authorization", "Bearer "+key.Secret)
+	w := httptest.NewRecorder()
+	New().Front().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("SSH key on ordinary loopback got %d, want 401", w.Code)
+	}
+}

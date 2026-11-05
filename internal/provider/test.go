@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"slices"
@@ -40,7 +43,7 @@ type Result struct {
 // serves, signed with a key made for it and asking for a model that key
 // sees, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
-	ctx = p.ownRequests(p.Via(ctx), probelog.KindTest)
+	ctx = withUnreached(p.ownRequests(p.Via(ctx), probelog.KindTest))
 	if p.DecideOnly() {
 		return p.testDecide(ctx)
 	}
@@ -60,7 +63,8 @@ func (p Provider) Test(ctx context.Context) []Result {
 			return []Result{{Protocol: proto, Error: zenPublicNone}}
 		}
 		url, body := tiny(q, proto, UpstreamName(p, model))
-		return []Result{probe(ctx, q, proto, url, q.tested(asClient(client, proto, body)), model, testWait)}
+		ctx, b := q.tested(ctx, asClient(client, proto, body))
+		return []Result{probe(ctx, q, proto, url, b, model, testWait)}
 	}
 	if p.isClaudeAccount() {
 		return []Result{p.testClaude(ctx, p.testModel(p, Anthropic))}
@@ -70,10 +74,10 @@ func (p Provider) Test(ctx context.Context) []Result {
 	}
 	var out []Result
 	for _, proto := range p.Speaks() {
-		if p.IsVertex() && proto == Chat {
-			// a partner model answers only once the project has turned it
-			// on in Model Garden: the provider is tested on Gemini, and a
-			// partner model by its own test (TestModel)
+		if p.IsVertex() && (proto == Chat || proto == Anthropic) {
+			// a partner model, and Claude, answer only once the project
+			// has turned them on in Model Garden: the provider is tested
+			// on Gemini, and such a model by its own test (TestModel)
 			continue
 		}
 		q, ok := p.keyFor(proto)
@@ -88,7 +92,8 @@ func (p Provider) Test(ctx context.Context) []Result {
 			continue
 		}
 		url, body := tiny(q, proto, UpstreamName(p, model))
-		out = append(out, probe(ctx, q, proto, url, q.tested(body), model, testWait))
+		ctx, b := q.tested(ctx, body)
+		out = append(out, probe(ctx, q, proto, url, b, model, testWait))
 	}
 	if len(out) == 0 && p.zenPublic() {
 		out = append(out, Result{Protocol: Chat, Error: zenPublicNone})
@@ -112,7 +117,7 @@ func tiny(q Provider, proto Protocol, model string) (url, body string) {
 		body = strings.TrimSuffix(body, "}") + `,"stream":true}`
 	}
 	if q.OpenCodeFree(model) && body != "" {
-		url, body = OpenCodeFreeURL(url), zenFreeProbe(proto, body)
+		url, body = OpenCodeFreeURL(url, proto), zenFreeProbe(proto, body)
 	}
 	if q.IsCline() && body != "" {
 		body = clineProbe(body)
@@ -195,13 +200,22 @@ func (p Provider) mantleBase(base, model string) string {
 func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 	switch proto {
 	case Chat:
-		if q.IsBedrock() || q.IsAzure() {
+		if q.IsBedrock() || q.IsAzure() || OpenAIHost(HostOf(q.Base(Chat))) {
+			// OpenAI's own API, Azure's and Bedrock's turn max_tokens away
+			// on their reasoning models (GoxxKintBlade on X: every model
+			// of an OpenAI key red, "Use 'max_completion_tokens' instead")
 			return q.mantleBase(q.Chat, model) + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}`, model)
 		}
 		return q.Base(Chat) + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 	case Responses:
 		return q.mantleBase(q.Responses, model) + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
 	case Anthropic:
+		if q.IsVertex() {
+			// Claude at the project, as Anthropic's Vertex SDK asks it
+			// (VertexClaudeRequest)
+			at, b, _ := VertexClaudeRequest("/v1/messages", fmt.Appendf(nil, `{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model))
+			return q.Base(Anthropic) + at, string(b)
+		}
 		return q.Anthropic + "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 	case Gemini:
 		if q.IsVertex() {
@@ -223,11 +237,67 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 // for the gateway, which gives it no such bound (mingxia_16024 on
 // Discord: every Qoder and WorkBuddy model's test ended at 20s while
 // agents were answered).
+// connectWait is how long a probe waits for its connection (a TLS
+// handshake done, through any proxy) before it gives up on the host: an
+// address nothing answers at is said in that time, not the whole wait's
+// (RIck on Discord: a failing test took too long to say so).
 var (
 	testWait       = 20 * time.Second
 	drawWait       = 2 * time.Minute
 	pluginTestWait = time.Minute
+	connectWait    = 10 * time.Second
 )
+
+// unreached is the hosts one test run couldn't connect to, with why
+// (host:port → string): its other requests there fail at once with the
+// same words instead of each waiting out its own connectWait. An answer
+// that is slow, or a model that doesn't answer, is the model's and is
+// never put here.
+type unreached struct{ sync.Map }
+
+type unreachedKey struct{}
+
+func withUnreached(ctx context.Context) context.Context {
+	if ctx.Value(unreachedKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, unreachedKey{}, &unreached{})
+}
+
+// errNoConnect is the cause a probe's request is ended with when its
+// connection wasn't had in connectWait.
+var errNoConnect = errors.New("no connection")
+
+// hostOnly reports whether err says the host can't be reached at all,
+// whatever is asked of it: its name doesn't resolve, nothing takes the
+// connection, the connection wasn't had in connectWait, or its
+// certificate isn't trusted.
+func hostOnly(err error) bool {
+	var dns *net.DNSError
+	var op *net.OpError
+	var cert *tls.CertificateVerificationError
+	return errors.Is(err, errNoConnect) || errors.As(err, &dns) || errors.As(err, &cert) || errors.As(err, &op) && op.Op == "dial"
+}
+
+// hostPort is u's host with its port, the scheme's when none is written.
+func hostPort(u *url.URL) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	if u.Scheme == "http" {
+		return net.JoinHostPort(u.Hostname(), "80")
+	}
+	return net.JoinHostPort(u.Hostname(), "443")
+}
+
+// connecting is ctx ended with errNoConnect when no connection was had
+// in connectWait; stop ends its timer.
+func connecting(ctx context.Context) (_ context.Context, stop func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	t := time.AfterFunc(connectWait, func() { cancel(errNoConnect) })
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { t.Stop() }})
+	return ctx, func() { t.Stop(); cancel(nil) }
+}
 
 // drawsOnImages is whether model is asked on p's images API, as the
 // gateway draws with it there: chat would be turned away, or answered in
@@ -257,7 +327,7 @@ func tinyDrawing(q Provider, model string) (url, body string) {
 // on the endpoint it's served on and with a key that sees it: whether each
 // answers, not only whether the vendor does. Results are in models' order.
 func (p Provider) TestModels(ctx context.Context, models []string) []Result {
-	ctx = p.ownRequests(p.Via(ctx), probelog.KindTest)
+	ctx = withUnreached(p.ownRequests(p.Via(ctx), probelog.KindTest))
 	out := make([]Result, len(models))
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
@@ -267,6 +337,11 @@ func (p Provider) TestModels(ctx context.Context, models []string) []Result {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if err := context.Cause(ctx); err != nil {
+				// stopped, or out of time, before its turn came
+				out[i] = Result{Model: model, Error: "not asked: " + err.Error()}
+				return
+			}
 			out[i] = p.testOne(ctx, model)
 		}()
 	}
@@ -301,7 +376,7 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	if p.isClaudeAccount() {
 		return p.testClaude(ctx, model)
 	}
-	if p.testsTranslated() {
+	if p.testsTranslated() || client == "" && p.pluginTranslated(model) {
 		return p.testTranslated(ctx, model)
 	}
 	var protos []Protocol
@@ -347,7 +422,8 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 		r := probe(ctx, q, proto, url, []byte(body), model, drawWait)
 		if !r.OK && ((r.Status == 404 || r.Status == 405) && HostOf(q.Chat) != "openrouter.ai" || r.Status == 400 && catalog.PointsToChat(r.Error)) {
 			url, body := tiny(q, proto, model)
-			if c := probe(ctx, q, proto, url, q.tested(body), model, testWait); c.OK {
+			ctx, b := q.tested(ctx, body)
+			if c := probe(ctx, q, proto, url, b, model, testWait); c.OK {
 				return c
 			}
 		}
@@ -416,7 +492,8 @@ func (p Provider) testOn(ctx context.Context, client string, proto Protocol, mod
 	if client != "" {
 		body = asClient(client, proto, body)
 	}
-	return probe(ctx, p, proto, url, p.tested(body), model, testWait)
+	ctx, b := p.tested(ctx, body)
+	return probe(ctx, p, proto, url, b, model, testWait)
 }
 
 // keyFor is p using the first key on that works with proto: one made for
@@ -553,7 +630,21 @@ func (p Provider) ownRequests(ctx context.Context, kind string) context.Context 
 // it: the vendor's error, a stream's error after its 200 too. Do would
 // write the status alone, so a failed test's row said nothing of why
 // (ysm119 on Discord: "no answer", and no error to find anywhere).
-func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) (r Result) {
+func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
+	r := probeOnce(ctx, p, proto, url, body, model, wait)
+	if proto == Chat && r.Status == http.StatusBadRequest {
+		// a vendor whose 400 names the other reply-length field as the
+		// one to send (a relay in front of OpenAI's reasoning models, or
+		// one that reads max_tokens alone) is asked once more with it, as
+		// the gateway asks it (forward)
+		if b, ok := WithTokenField(body, TokenFieldWanted([]byte(r.Error))); ok {
+			return probeOnce(ctx, p, proto, url, b, model, wait)
+		}
+	}
+	return r
+}
+
+func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) (r Result) {
 	r = Result{Protocol: proto, Model: model}
 	if model == "" {
 		r.Error = "no model to try: expose one, or refresh the model list"
@@ -574,17 +665,32 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	if logged {
 		rctx = probelog.Taken(ctx)
 	}
+	if !p.IsPlugin() && (p.Account == nil || p.Account.transport == nil && p.Account.clientFor == nil) {
+		// a plugin's or an account's own client may make no connection
+		// that tells the trace
+		var stop func()
+		rctx, stop = connecting(rctx)
+		defer stop()
+	}
 	req, err := http.NewRequestWithContext(rctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		r.Error = err.Error()
 		return r
+	}
+	host := hostPort(req.URL)
+	dead, _ := ctx.Value(unreachedKey{}).(*unreached)
+	if dead != nil {
+		if why, ok := dead.Load(host); ok {
+			r.Error = why.(string)
+			return r
+		}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if proto == Anthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
 	if OpenCodeURL(url) {
-		OpenCodeClient(req.Header, "") // a session of the probe's own
+		OpenCodeClient(req.Header, "", "") // a session of the probe's own, from the home folder
 	}
 	if p.IsCline() {
 		ClineClient(req.Header)
@@ -655,6 +761,14 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	r.Millis = time.Since(start).Milliseconds()
 	if err != nil {
 		r.Error = strings.TrimPrefix(err.Error(), "Post \""+url+"\": ")
+		if context.Cause(rctx) == errNoConnect {
+			err, r.Error = errNoConnect, fmt.Sprintf("couldn't connect to %s in %s", req.URL.Host, connectWait)
+		} else if ctx.Err() == context.DeadlineExceeded {
+			r.Error = fmt.Sprintf("no answer in %s", time.Since(start).Round(time.Second))
+		}
+		if dead != nil && hostOnly(err) {
+			dead.Store(host, r.Error)
+		}
 		return r
 	}
 	defer res.Body.Close()
@@ -665,6 +779,9 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 		if streams(body) {
 			if msg, failed := streamAnswer(res.Body); failed {
 				r.Error = msg
+				if ctx.Err() == context.DeadlineExceeded {
+					r.Error = fmt.Sprintf("no answer in %s", time.Since(start).Round(time.Second))
+				}
 				return r
 			}
 		}
@@ -688,7 +805,8 @@ func streams(body []byte) bool {
 // streamAnswer reads a streamed answer up to the first thing the model
 // says — a word, a thought or a tool call, in Chat's, Responses' or
 // Anthropic's events — and reports an error the stream gives before that.
-// A stream that ends with neither was answered, as a 200 always was.
+// A stream that ends with neither was answered, as a 200 always was; one
+// broken off, or held open past the probe's wait, was not.
 func streamAnswer(r io.Reader) (msg string, failed bool) {
 	sc := bufio.NewScanner(io.LimitReader(r, 1<<20))
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
@@ -735,6 +853,9 @@ func streamAnswer(r io.Reader) (msg string, failed bool) {
 			}
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return "the stream broke off before the model answered: " + err.Error(), true
+	}
 	return "", false
 }
 
@@ -759,12 +880,25 @@ func EdgeBlocked(b []byte) bool {
 	return edgeBlocked.Match(b) || bytes.Contains(b, []byte(BlockedHint))
 }
 
+// restrictedHinted says an error body is one a plugin already put in
+// magpie's words as an account its vendor restricted: ZCode's Start Plan
+// 3012 (ZCodeRestrictedHint) keeps ZCode's own "request has been blocked
+// due to unusual activity" in front of the hint, which edgeBlocked reads
+// as a firewall's page. Told as that, the hint was cut, the agent was told
+// to change networks, and the gateway rested the account as any failure,
+// never as restricted: the 405 windy_66454 met (Discord, 10-31) read
+// "405 Method Not Allowed — " BlockedHint, the same words ZCode's 3012
+// and Alibaba Cloud's page were both told in.
+func restrictedHinted(b []byte) bool {
+	return bytes.Contains(b, []byte(ZCodeRestrictedHint)) || bytes.Contains(b, []byte(WBRestrictedHint))
+}
+
 // APIError pulls the human message out of an error body when there is one.
 // A firewall's block page is put in plain words (BlockedHint); Google's
 // "verify your account" refusal also says what to do about it, with the
 // link it gave.
 func APIError(b []byte, fallback string) string {
-	if edgeBlocked.Match(b) {
+	if edgeBlocked.Match(b) && !restrictedHinted(b) {
 		if said, ok := WebPage(b); ok && fallback != "" {
 			return fallback + ": " + said + " — " + BlockedHint
 		}

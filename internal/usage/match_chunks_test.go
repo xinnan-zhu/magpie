@@ -53,7 +53,7 @@ func TestMatchOpensOnlyNamedChunks(t *testing.T) {
 		for _, since := range []time.Time{{}, now.Add(5 * time.Second)} {
 			var opened []*rowChunk
 			matchOpening = func(c *rowChunk) { opened = append(opened, c) }
-			got := matchedBlocks([]*rowChunk{gateway}, locals, nil, nil, since, false)
+			got := refMap(matchedBlocks([]*rowChunk{gateway}, locals, nil, nil, since, false))
 			matchOpening = nil
 			want := matchedLocalLegacy(gateway, locals, nil, since)
 			if !reflect.DeepEqual(got, want) {
@@ -84,12 +84,27 @@ func TestMatchOpensAgyChunks(t *testing.T) {
 	var opened []*rowChunk
 	matchOpening = func(c *rowChunk) { opened = append(opened, c) }
 	t.Cleanup(func() { matchOpening = nil })
-	got := matchedBlocks([]*rowChunk{gateway}, []*rowChunk{agy, other}, nil, nil, time.Time{}, false)
+	got := refMap(matchedBlocks([]*rowChunk{gateway}, []*rowChunk{agy, other}, nil, nil, time.Time{}, false))
 	if !got[rowRef{agy, 0}] || len(got) != 1 {
 		t.Fatalf("matched %v; want the agy step alone", got)
 	}
 	if len(opened) != 1 || opened[0] != agy {
 		t.Fatalf("decoded %d chunks; want the agy transcript alone", len(opened))
+	}
+}
+
+// The Antigravity app's session-less gateway calls may be agy's, which
+// follows the app's gateway when it isn't connected on its own row: the agy
+// transcript is opened for them too.
+func TestMatchOpensAgyChunksForTheApp(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	gateway, agy := &rowChunk{}, &rowChunk{}
+	gateway.add(Row{Record: Record{Time: now, Agent: "antigravity", Provider: "relay", Input: 7, Output: 3, Millis: 1000}}, "", 0, false)
+	agy.add(Row{Record: Record{Time: now.Add(-time.Minute), Agent: "agy", Session: "agy-transcript", Input: 7, Output: 3}, Source: "log"}, "", 0, false)
+	agy.serial = nextChunkSerial()
+	got := refMap(matchedBlocks([]*rowChunk{gateway}, []*rowChunk{agy}, nil, nil, time.Time{}, false))
+	if !got[rowRef{agy, 0}] || len(got) != 1 {
+		t.Fatalf("matched %v; want the agy step", got)
 	}
 }
 
@@ -110,7 +125,7 @@ func TestMatchByIDAllocatesNoSliceAnID(t *testing.T) {
 		local.add(Row{Record: r, Source: "log"}, "", int64(i), false)
 	}
 	local.serial = nextChunkSerial()
-	got := matchedBlocks([]*rowChunk{gateway}, []*rowChunk{local}, nil, nil, time.Time{}, false)
+	got := refMap(matchedBlocks([]*rowChunk{gateway}, []*rowChunk{local}, nil, nil, time.Time{}, false))
 	if want := matchedLocalLegacy(gateway, []*rowChunk{local}, nil, time.Time{}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("%d matches, want %d", len(got), len(want))
 	}

@@ -177,6 +177,9 @@ func (f *vertexGoogle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case vertex && strings.Contains(r.URL.Path, "/models/gemini-9-pro:"):
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, "{\"error\":{\"code\":404,\"message\":\"Publisher Model `projects/acme-vertex/locations/global/publishers/google/models/gemini-9-pro` was not found or your project does not have access to it. Please ensure you are using a valid model version. For more information, see: https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions\",\"status\":\"NOT_FOUND\"}}")
+	case vertex && strings.HasSuffix(r.URL.Path, ":rawPredict") && strings.Contains(r.URL.Path, "/publishers/anthropic/models/"):
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"msg_vrtx_1","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Hi"}],"stop_reason":"max_tokens","usage":{"input_tokens":8,"output_tokens":1}}`)
 	case vertex && strings.HasSuffix(r.URL.Path, "/endpoints/openapi/chat/completions"):
 		// a partner model, on Google's OpenAI-compatible chat completions,
 		// answered as its docs show
@@ -506,7 +509,7 @@ func TestVertexProviderListed(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "https://aiplatform.googleapis.com/v1/projects/acme-vertex/locations/global"
-	if !p.Ready() || !p.On() || !slices.Equal(p.Speaks(), []Protocol{Chat, Gemini}) || p.Base(Gemini) != base || p.Base(Chat) != base+"/endpoints/openapi" {
+	if !p.Ready() || !p.On() || !slices.Equal(p.Speaks(), []Protocol{Chat, Anthropic, Gemini}) || p.Base(Gemini) != base || p.Base(Chat) != base+"/endpoints/openapi" || p.Base(Anthropic) != base {
 		t.Fatalf("ready %v, on %v, speaks %v at %q", p.Ready(), p.On(), p.Speaks(), p.Base(Gemini))
 	}
 	if !customIDs()["vertex-prod"] || PluginID("vertex-prod") != "vertex-prod-plugin" {
@@ -1583,7 +1586,7 @@ func TestVertexPartnerModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := f.url + "/vertex/v1/projects/acme-vertex/locations/global"
-	if !slices.Equal(p.Speaks(), []Protocol{Chat, Gemini}) || p.Base(Chat) != base+"/endpoints/openapi" || p.Base(Gemini) != base {
+	if !slices.Equal(p.Speaks(), []Protocol{Chat, Anthropic, Gemini}) || p.Base(Chat) != base+"/endpoints/openapi" || p.Base(Gemini) != base {
 		t.Fatalf("speaks %v, chat at %q, Gemini at %q", p.Speaks(), p.Base(Chat), p.Base(Gemini))
 	}
 	partners := []string{"deepseek-ai/deepseek-v4.1-flash-maas", "zai-org/glm-5.2-maas", "openai/gpt-oss-120b-maas"}
@@ -1649,5 +1652,100 @@ func TestVertexPartnerModels(t *testing.T) {
 	}
 	if chats != 1 {
 		t.Errorf("chat completions asked %d times, want 1", chats)
+	}
+}
+
+// Vertex AI's Claude models are served on Anthropic's Messages API at the
+// project, under the anthropic publisher, signed with the same Google
+// token as Gemini and with nothing more set by the user: global lists the
+// current ones, the id alone puts a model on that API (one typed in with
+// Vertex's @date too), and its test is asked as Anthropic's Vertex SDK
+// asks: :rawPredict at the model's path, the model out of the body and
+// anthropic_version vertex-2023-10-16 in it. The provider's own test
+// still asks Gemini alone, as Claude answers only once the project turned
+// it on in Model Garden.
+func TestVertexClaudeModels(t *testing.T) {
+	vertexHome(t)
+	f := newVertexGoogle(t)
+	file := filepath.Join(t.TempDir(), "application_default_credentials.json")
+	writeFile(t, file, vertexUser("1//0g-test-refresh"))
+	if err := Save(vertexAt("global", file)); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Find("vertex-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := f.url + "/vertex/v1/projects/acme-vertex/locations/global"
+	if p.Base(Anthropic) != base {
+		t.Fatalf("Claude at %q, want %q", p.Base(Anthropic), base)
+	}
+	listed := modelIDs(p.Available())
+	for _, m := range []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"} {
+		if !slices.Contains(listed, m) {
+			t.Errorf("%s not listed at global: %v", m, listed)
+		}
+	}
+	for _, m := range []string{"claude-sonnet-5-5", "claude-sonnet-4-5@20250929", "Claude-Opus-4-1@20250805"} {
+		if apis := p.APIs(m); !slices.Equal(apis, []Protocol{Anthropic}) {
+			t.Errorf("%s asked on %v", m, apis)
+		}
+	}
+	for _, m := range []string{"gemini-3.8-flash", "anthropic/claude-x"} {
+		if apis := p.APIs(m); slices.Contains(apis, Anthropic) {
+			t.Errorf("%s asked on %v", m, apis)
+		}
+	}
+	rs := p.Test(context.Background())
+	if len(rs) != 1 || !rs[0].OK || rs[0].Protocol != Gemini {
+		t.Fatalf("provider test: %+v", rs)
+	}
+	rs = p.TestModels(context.Background(), []string{"claude-sonnet-4-5@20250929"})
+	if len(rs) != 1 || !rs[0].OK || rs[0].Protocol != Anthropic {
+		t.Fatalf("Claude's test: %+v", rs)
+	}
+	calls := f.vertexCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Vertex AI was asked %d times, want 2: %+v", len(calls), calls)
+	}
+	c := calls[1]
+	var body map[string]any
+	json.Unmarshal([]byte(c.body), &body)
+	if c.path != "/vertex/v1/projects/acme-vertex/locations/global/publishers/anthropic/models/claude-sonnet-4-5@20250929:rawPredict" ||
+		c.header.Get("Authorization") != "Bearer ya29.minted-1" {
+		t.Errorf("Claude asked at %s with %q", c.path, c.header.Get("Authorization"))
+	}
+	if _, has := body["model"]; has || body["anthropic_version"] != "vertex-2023-10-16" || body["max_tokens"] != float64(16) {
+		t.Errorf("Claude asked with %s", c.body)
+	}
+}
+
+// A request made for Anthropic's Messages API goes to Vertex AI as
+// Anthropic's Vertex SDK sends it: streamed at :streamRawPredict, whole at
+// :rawPredict, beta=true dropped, the model out of the body; a count at
+// count-tokens:rawPredict with the model kept; anthropic_version added
+// unless the body has one, and the rest of the body as it came.
+func TestVertexClaudeRequest(t *testing.T) {
+	for _, c := range []struct{ path, body, at, want string }{
+		{"/v1/messages", `{"model":"claude-opus-5-5","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"<a> & b"}]}`,
+			"/publishers/anthropic/models/claude-opus-5-5:streamRawPredict",
+			`{"anthropic_version":"vertex-2023-10-16","max_tokens":5,"messages":[{"role":"user","content":"<a> & b"}],"stream":true}`},
+		{"/v1/messages?beta=true", `{"model":"claude-sonnet-4-5@20250929","max_tokens":5,"stream":false}`,
+			"/publishers/anthropic/models/claude-sonnet-4-5@20250929:rawPredict",
+			`{"anthropic_version":"vertex-2023-10-16","max_tokens":5,"stream":false}`},
+		{"/v1/messages", `{"model":"claude-haiku-5-5","anthropic_version":"vertex-2099-01-01"}`,
+			"/publishers/anthropic/models/claude-haiku-5-5:rawPredict",
+			`{"anthropic_version":"vertex-2099-01-01"}`},
+		{"/v1/messages/count_tokens?beta=true", `{"model":"claude-opus-5-5","messages":[]}`,
+			"/publishers/anthropic/models/count-tokens:rawPredict",
+			`{"anthropic_version":"vertex-2023-10-16","messages":[],"model":"claude-opus-5-5"}`},
+	} {
+		at, b, ok := VertexClaudeRequest(c.path, []byte(c.body))
+		if !ok || at != c.at || string(b) != c.want {
+			t.Errorf("%s %s: %v %s %s", c.path, c.body, ok, at, b)
+		}
+	}
+	if _, _, ok := VertexClaudeRequest("/v1/messages", []byte(`{"max_tokens":5}`)); ok {
+		t.Error("a body with no model was given a path")
 	}
 }

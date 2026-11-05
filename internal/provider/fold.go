@@ -342,6 +342,8 @@ func foldWhere(candidates func([]Provider) [][]int) (int, error) {
 			g.Rules[k].MapUses(ref)
 		}
 		g.Fast = compact(mapEach(g.Fast, ref))
+		g.Placed = compact(mapEach(g.Placed, ref))
+		g.Seen = compact(mapEach(g.Seen, ref))
 		g.Off = compact(mapEach(g.Off, ref))
 		g.Weights = renamedWeights(g.Weights, ref)
 		g.Classifier = ref(g.Classifier)
@@ -558,7 +560,7 @@ func foldHistories(folds [][]int, ps []Provider) {
 	balanceHistMu.Unlock()
 	quotaHistMu.Lock()
 	if _, err := os.Stat(quotaHistPath()); err == nil {
-		h := readQuotaHist()
+		h := heldQuotaHist()
 		changed := false
 		for k, lines := range h {
 			if to, ok := moved(k); ok {

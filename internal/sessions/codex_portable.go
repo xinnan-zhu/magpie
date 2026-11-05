@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -38,6 +39,30 @@ import (
 // A reasoning item magpie gave Codex with Claude's block in its
 // encrypted_content (claudeseal) is refused the same way; it is written
 // as its summary, as the gateway sends it to OpenAI.
+//
+// A reasoning item magpie gave Codex for a reply another vendor made
+// (WorkBuddy, DeepSeek, Kimi …) isn't one OpenAI sealed, and once Codex
+// talks to OpenAI itself every turn of the thread is refused, which
+// Codex doesn't retry (hentulong on X, after routing Codex to WorkBuddy
+// and back; each tried on a real ChatGPT account):
+//   - a summary and no encrypted_content: the history is taken as a
+//     warmup, and the turn sent on it with previous_response_id is
+//     refused, 400 unsupported_persisted_item_context, "Persisted response
+//     contains hosted-tool, compaction, or unverifiable hidden reasoning
+//     state that Rustponses cannot replay";
+//   - its reasoning_text in content: 400 array_above_max_length
+//     ("Invalid 'input[5].content': array too long");
+//   - another API's encrypted_content: invalid_encrypted_content.
+//
+// Every reasoning item OpenAI didn't seal (its encrypted_content is a
+// Fernet token, "gAAAA…"), one with Claude's block too, is written as
+// magpie_reasoning, a type Codex reads as one it doesn't know and never
+// sends (ResponseItem::Other), its summary and content kept for magpie's
+// own reading. That is done only as magpie lets Codex go
+// (PortCodexRolloutsLeft), as through magpie the gateway sends each as
+// the model it goes to takes it (a DeepSeek or Kimi one gets its
+// reasoning back from them), and only in a thread begun on OpenAI's or
+// magpie's provider: one on another provider of the user's own is theirs.
 //
 // Only magpie's compaction items and those reasoning items change, in
 // whichever line holds them (a response_item, a compacted line's
@@ -70,6 +95,15 @@ type codexPortHome struct {
 // own (c3931c91d, 2026-09-25): no rollout last written before then has one.
 var codexPortFirst = time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 
+// codexLeftFirst is the day before magpie's first commit (2026-09-22): no
+// rollout last written before then has a reasoning item of magpie's.
+var codexLeftFirst = time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
+
+// codexLeftKey is the state a PortCodexRolloutsLeft pass keeps for a
+// home, apart from the other passes': one of those, while Codex went
+// through magpie, left magpie's reasoning items as they were.
+const codexLeftKey = " (left)"
+
 // codexPortSlack is how far before a pass began the next one looks again:
 // a file's time can be coarser than the clock.
 const codexPortSlack = 2 * time.Minute
@@ -89,6 +123,17 @@ type CodexPort struct {
 // ctx ends. The first pass reads every rollout written since magpie began
 // to compact; later ones only what changed since.
 func PortCodexRollouts(ctx context.Context, home string) (CodexPort, error) {
+	return portCodexRollouts(ctx, home, false)
+}
+
+// PortCodexRolloutsLeft is PortCodexRollouts for a Codex that no longer
+// goes through magpie: magpie's reasoning items are written as
+// magpie_reasoning too, as OpenAI can't take them as a base.
+func PortCodexRolloutsLeft(ctx context.Context, home string) (CodexPort, error) {
+	return portCodexRollouts(ctx, home, true)
+}
+
+func portCodexRollouts(ctx context.Context, home string, left bool) (CodexPort, error) {
 	var res CodexPort
 	locks := filepath.Join(home, "thread-writer-locks")
 	if fi, err := os.Stat(locks); err != nil || !fi.IsDir() {
@@ -111,9 +156,12 @@ func PortCodexRollouts(ctx context.Context, home string) (CodexPort, error) {
 	if st.Homes == nil {
 		st.Homes = map[string]codexPortHome{}
 	}
-	key := filepath.Clean(home)
+	key, first := filepath.Clean(home), codexPortFirst
+	if left {
+		key, first = key+codexLeftKey, codexLeftFirst
+	}
 	was := st.Homes[key]
-	since := codexPortFirst
+	since := first
 	if !was.Since.IsZero() {
 		since = was.Since.Add(-codexPortSlack)
 	}
@@ -152,7 +200,7 @@ func PortCodexRollouts(ctx context.Context, home string) (CodexPort, error) {
 			pending = append(pending, due[i:]...)
 			break
 		}
-		changed, err := portRollout(ctx, home, p)
+		changed, err := portRollout(ctx, home, p, left)
 		switch {
 		case errors.Is(err, errRolloutHeld):
 			res.Held = append(res.Held, p)
@@ -225,22 +273,49 @@ var magpieMark = []byte(codexsummary.Mark)
 // block (claudeseal), which only magpie reads.
 var claudeMark = []byte(claudeseal.Mark)
 
+// reasoningMark is in a line with a reasoning item, as Codex writes it;
+// openAISealed begins the encrypted_content of one OpenAI sealed (a
+// Fernet token).
+var reasoningMark, openAISealed = []byte(`"type":"reasoning"`), []byte(`"encrypted_content":"gAAAA`)
+
+// unsealedReasoning says a line may hold a reasoning item OpenAI didn't
+// seal, which a line of OpenAI's own reasoning (most of them) doesn't; a
+// compacted line, with other items' seals beside, is always looked at.
+func unsealedReasoning(line []byte) bool {
+	n := bytes.Count(line, reasoningMark)
+	return n > 0 && (n > bytes.Count(line, openAISealed) || bytes.Contains(line[:min(len(line), 256)], []byte(`"type":"compacted"`)))
+}
+
 // portRollout writes the rollout at path portable, if it has magpie's
-// compaction item, and says whether it did.
-func portRollout(ctx context.Context, home, path string) (bool, error) {
-	return editRollout(ctx, home, path, func(line []byte, paged bool) ([]byte, bool) {
-		out, ok := portLine(line)
-		if ok {
-			out, ok = fitLine(line, out, paged)
+// compaction item (or, left, a reasoning item OpenAI didn't seal), and
+// says whether it did.
+func portRollout(ctx context.Context, home, path string, left bool) (bool, error) {
+	return editRollout(ctx, home, path, func() func(line []byte, paged bool) ([]byte, bool) {
+		ours := true // begun on OpenAI's provider or magpie's
+		return func(line []byte, paged bool) ([]byte, bool) {
+			if isMetaLine(line) {
+				switch gjson.GetBytes(line, "payload.model_provider").String() {
+				case "", "openai", "magpie":
+				default:
+					ours = false
+				}
+			}
+			out, ok := portLineAs(line, left && ours)
+			if ok {
+				out, ok = fitLine(line, out, paged)
+			}
+			return out, ok
 		}
-		return out, ok
 	})
 }
 
-// editRollout writes the rollout at path with each line as edit gives it,
-// if edit changed one, and says whether it did; paged is whether the
-// rollout's history is paginated.
-func editRollout(ctx context.Context, home, path string, edit func(line []byte, paged bool) ([]byte, bool)) (bool, error) {
+// editRollout writes the rollout at path with each line as an edit from
+// edits gives it, if one changed a line, and says whether it did; paged is
+// whether the rollout's history is paginated. The rollout is read once to
+// see whether a line changes, and only then again to write it: most
+// rollouts a pass looks at have nothing to change, and writing each one
+// out, compressed for a .zst, cost a pass more than reading it (#4735).
+func editRollout(ctx context.Context, home, path string, edits func() func(line []byte, paged bool) ([]byte, bool)) (bool, error) {
 	thread := codexThreadOf(filepath.Base(path))
 	if thread == "" {
 		return false, nil
@@ -249,24 +324,26 @@ func editRollout(ctx context.Context, home, path string, edit func(line []byte, 
 	if err != nil {
 		return false, err
 	}
-	in, err := openLines(path)
-	if err != nil {
+	if changed, err := eachEditedLine(ctx, path, edits(), nil); err != nil || !changed {
 		return false, err
 	}
-	defer in.Close()
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".magpie-"+filepath.Base(path)+"-*")
 	if err != nil {
 		return false, err
 	}
+	rolloutWrites.Add(1)
 	done := false
+	var z *zstd.Encoder
 	defer func() {
 		if !done {
+			if z != nil {
+				z.Close()
+			}
 			tmp.Close()
 			os.Remove(tmp.Name())
 		}
 	}()
 	var w io.Writer = tmp
-	var z *zstd.Encoder
 	if packed(path) {
 		if z, err = zstd.NewWriter(tmp); err != nil {
 			return false, err
@@ -274,39 +351,20 @@ func editRollout(ctx context.Context, home, path string, edit func(line []byte, 
 		w = z
 	}
 	bw := bufio.NewWriterSize(w, 64<<10)
-	br := bufio.NewReaderSize(in, 64<<10)
-	changed := false
-	paged, metaSeen := false, false
-	for n := 0; ; n++ {
-		if n%4096 == 0 && ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			if !metaSeen && isMetaLine(line) {
-				paged, metaSeen = paginated(line), true
-			}
-			out, ok := edit(line, paged)
-			changed = changed || ok
-			if _, werr := bw.Write(out); werr != nil {
-				return false, werr
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return false, err
-		}
+	changed, err := eachEditedLine(ctx, path, edits(), bw)
+	if err != nil {
+		return false, err
 	}
 	if !changed {
-		return false, nil
+		return false, errRolloutHeld // it changed between the reads
 	}
 	if err := bw.Flush(); err != nil {
 		return false, err
 	}
 	if z != nil {
-		if err := z.Close(); err != nil {
+		err := z.Close()
+		z = nil
+		if err != nil {
 			return false, err
 		}
 	}
@@ -319,7 +377,6 @@ func editRollout(ctx context.Context, home, path string, edit func(line []byte, 
 	if err := tmp.Close(); err != nil {
 		return false, err
 	}
-	in.Close()
 	os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
 
 	// published as Codex publishes a compressed rollout: under the
@@ -350,6 +407,63 @@ func editRollout(ctx context.Context, home, path string, edit func(line []byte, 
 	}
 	done = true
 	return true, nil
+}
+
+// rolloutWrites counts the rollouts editRollout began to write out.
+var rolloutWrites atomic.Int64
+
+// eachEditedLine reads the rollout at path through edit, writing each
+// line as edit gives it to w (when there is one), and says whether edit
+// changed a line.
+func eachEditedLine(ctx context.Context, path string, edit func(line []byte, paged bool) ([]byte, bool), w io.Writer) (bool, error) {
+	in, err := openLines(path)
+	if err != nil {
+		return false, err
+	}
+	defer in.Close()
+	br := bufio.NewReaderSize(in, 64<<10)
+	changed := false
+	paged, metaSeen := false, false
+	for n := 0; ; n++ {
+		if n%4096 == 0 && ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		line, err := br.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			var long []byte
+			long, err = readLongLine(br, line)
+			line = long
+		}
+		if len(line) > 0 {
+			if !metaSeen && isMetaLine(line) {
+				paged, metaSeen = paginated(line), true
+			}
+			out, ok := edit(line, paged)
+			changed = changed || ok
+			if w == nil && changed {
+				return true, nil
+			}
+			if w != nil {
+				if _, werr := w.Write(out); werr != nil {
+					return false, werr
+				}
+			}
+		}
+		if err == io.EOF {
+			return changed, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
+// readLongLine is the rest of a line longer than br's buffer, after its
+// start: ReadSlice's, which the next read writes over, so it is copied.
+func readLongLine(br *bufio.Reader, start []byte) ([]byte, error) {
+	line := append([]byte{}, start...)
+	rest, err := br.ReadBytes('\n')
+	return append(line, rest...), err
 }
 
 // Codex keeps places in a rollout by byte: a fork's or a revert's
@@ -444,15 +558,17 @@ func repairLineages(ctx context.Context, home string) (fixed []string, whole boo
 		if !ok || at == base.Get("end_byte_offset").Int() {
 			continue
 		}
-		changed, err := editRollout(ctx, home, p, func(line []byte, paged bool) ([]byte, bool) {
-			r := gjson.GetBytes(line, "payload.history_base.end_byte_offset")
-			if !isMetaLine(line) || r.Index <= 0 || r.Type != gjson.Number {
-				return line, false
+		changed, err := editRollout(ctx, home, p, func() func(line []byte, paged bool) ([]byte, bool) {
+			return func(line []byte, paged bool) ([]byte, bool) {
+				r := gjson.GetBytes(line, "payload.history_base.end_byte_offset")
+				if !isMetaLine(line) || r.Index <= 0 || r.Type != gjson.Number {
+					return line, false
+				}
+				out := append([]byte{}, line[:r.Index]...)
+				out = strconv.AppendInt(out, at, 10)
+				out = append(out, line[r.Index+len(r.Raw):]...)
+				return fitLine(line, out, true)
 			}
-			out := append([]byte{}, line[:r.Index]...)
-			out = strconv.AppendInt(out, at, 10)
-			out = append(out, line[r.Index+len(r.Raw):]...)
-			return fitLine(line, out, true)
 		})
 		switch {
 		case err != nil:
@@ -518,6 +634,90 @@ func ordinalEnds(path string) map[int64]int64 {
 			return ends
 		}
 	}
+}
+
+// portLineAs is portLine, with magpie's reasoning items written as
+// magpie_reasoning first when left.
+func portLineAs(line []byte, left bool) ([]byte, bool) {
+	retired := false
+	if left && unsealedReasoning(line) {
+		line, retired = retireReasoning(line)
+	}
+	out, ok := portLine(line)
+	return out, ok || retired
+}
+
+// retireReasoning is a rollout line with each reasoning item in it that
+// OpenAI didn't seal (a response_item's, those in a compacted line's
+// replacement_history) written as magpie_reasoning: a type Codex reads
+// as one it doesn't know (ResponseItem::Other) and never sends. The item
+// keeps its summary, content and keys' order, without its id and
+// encrypted_content, so the line is no longer; the rest of the line keeps
+// its bytes, as magpie's own readers read a line's head by them.
+func retireReasoning(line []byte) ([]byte, bool) {
+	body := bytes.TrimRight(line, "\r\n")
+	if !gjson.ValidBytes(body) {
+		return line, false
+	}
+	var at []gjson.Result // items, in the order they are in body, with their place
+	switch gjson.GetBytes(body, "type").String() {
+	case "response_item":
+		at = append(at, gjson.GetBytes(body, "payload"))
+	case "compacted":
+		h := gjson.GetBytes(body, "payload.replacement_history")
+		if !h.IsArray() || h.Index <= 0 {
+			break
+		}
+		from := 0
+		h.ForEach(func(_, v gjson.Result) bool {
+			i := strings.Index(h.Raw[from:], v.Raw)
+			if i < 0 {
+				return false
+			}
+			v.Index = h.Index + from + i
+			from += i + len(v.Raw)
+			at = append(at, v)
+			return true
+		})
+	}
+	var out []byte
+	done := 0
+	for _, it := range at {
+		if it.Index <= 0 || !it.IsObject() || it.Get("type").String() != "reasoning" {
+			continue
+		}
+		if strings.HasPrefix(it.Get("encrypted_content").String(), "gAAAA") {
+			continue // OpenAI's own
+		}
+		var obj []byte
+		it.ForEach(func(k, v gjson.Result) bool {
+			switch k.String() {
+			case "id", "encrypted_content":
+				return true
+			}
+			if len(obj) > 0 {
+				obj = append(obj, ',')
+			}
+			obj = append(obj, k.Raw...)
+			obj = append(obj, ':')
+			if k.String() == "type" {
+				obj = append(obj, `"magpie_reasoning"`...)
+			} else {
+				obj = append(obj, v.Raw...)
+			}
+			return true
+		})
+		out = append(out, body[done:it.Index]...)
+		out = append(out, '{')
+		out = append(out, obj...)
+		out = append(out, '}')
+		done = it.Index + len(it.Raw)
+	}
+	if out == nil {
+		return line, false
+	}
+	out = append(out, line[done:]...)
+	return out, true
 }
 
 // portLine is a rollout line with each of magpie's compaction items in it

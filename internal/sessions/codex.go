@@ -27,6 +27,7 @@ type cxLine struct {
 		SessionID      string          `json:"session_id"`
 		ThreadID       string          `json:"thread_id"`
 		ParentThreadID string          `json:"parent_thread_id"`
+		ForkedFrom     string          `json:"forked_from_id"`
 		Source         json.RawMessage `json:"source"`
 		TurnID         string          `json:"turn_id"`
 		ResponseID     string          `json:"response_id"`
@@ -394,12 +395,17 @@ func codexSubagentTaskTitles(files []file) map[codexTaskTitle]string {
 		if f.agent != "codex" || cache[f.path] == nil {
 			continue
 		}
+		st := cache[f.path]
+		// most threads spawn no agent: four maps for each of them on every
+		// poll were ~140 MB in 80s of polls over ~34k sessions (#2278)
+		if len(st.CodexSpawnConflicts) == 0 && len(st.CodexAgentConflicts) == 0 && len(st.CodexSpawnNames) == 0 && len(st.CodexAgentIDs) == 0 {
+			continue
+		}
 		calls := parents[f.key]
 		if calls == nil {
 			calls = &parentCalls{names: map[string]string{}, children: map[string]string{}, badNames: map[string]bool{}, badChildren: map[string]bool{}}
 			parents[f.key] = calls
 		}
-		st := cache[f.path]
 		for id := range st.CodexSpawnConflicts {
 			calls.badNames[id] = true
 		}
@@ -718,6 +724,7 @@ func codexBody(s *state, b []byte, main bool) {
 		codexState(s).context(session, "", "")
 		codexState(s).beginSnapshot(at, p.ID, p.cxHistorySnapshot)
 		if s.ID == "" {
+			codexState(s).forkedFrom(s.codexPath, p.ForkedFrom)
 			s.ID = p.ID
 			if s.Provider = p.ModelProvider; s.Provider == "" {
 				s.Provider = "openai"

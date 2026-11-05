@@ -203,6 +203,10 @@ supply another token. The local computer and SSH tunnel must remain running.
 routing and bridge. It authenticates the connection's exact machine key on
 all requests, including loopback with LAN off. It allows model discovery and
 Claude/Codex inference routes only. Ordinary listeners reject machine keys.
+Machine keys cannot issue short-lived gateway keys: those would escape the
+connection-specific ingress. Authentication preserves the machine marker through
+`access.Check`; a stored child under a machine key is refused too. Ordinary
+user keys retain the existing short-lived key behavior.
 The normal key model allowlists and budgets still apply, and revocation takes
 effect on the next request. Remote Magpie forwarding from this ingress is
 refused to prevent recursive gateways. No shared-network authorization changes.
@@ -234,7 +238,8 @@ still explain missing models. A generic 400 write failure, 5xx, or lost/invalid
 reply remains uncertain. Tunnel, copy and disconnect dialogs keep pending and
 failure feedback inside the dialog. Copying requires at least one selection;
 an empty list explains that subscriptions use the local gateway. Agent errors
-remain on the page and say which model-source setup is needed.
+remain on the page and say which model-source setup is needed, without a
+duplicate floating status pill covering the retry controls.
 Successful tunnel/copy setup remains visible if the subsequent agent refresh
 fails; that read failure is shown on the page and can be refreshed separately.
 Provider import is atomic within providers.json; agent mutations retain
