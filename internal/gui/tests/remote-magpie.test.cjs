@@ -152,6 +152,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // the decision model's own address field, by its label as i18n.js has it
           for (const label of w.decide) assert.equal(await saved.locator("label", { hasText: label }).count(), 0, label);
           assert.equal(await saved.locator('input[type="url"]').count(), 1, "only the remote's address is editable");
+          // Picked only initially hides the unpicked classifiers (#4398).
+          if (decisions) await saved.locator(".mchips-rest").click();
+          assert.equal(saves.length, 0, "revealing unpicked models changes no configuration");
           assert.deepEqual(await saved.locator(".mchip > span:first-child").allTextContents(),
             decisions ? ["Chat", "custom-a · judge", "custom-b · judge"] : ["Chat"]);
           if (process.env.ARTIFACT_DIR && engine === "chromium" && lang === "en") {

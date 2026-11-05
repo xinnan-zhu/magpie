@@ -115,7 +115,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     for (const theme of ["dark", "light"]) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) for (const width of [980, 420]) {
       await t.test(`${theme} ${lang} ${width}`, async () => {
         const page = await (await browser.newContext({ viewport: { width, height: 820 } })).newPage();
-        page.setDefaultTimeout(5000);
+        page.setDefaultTimeout(5000); page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, theme));

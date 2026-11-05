@@ -13,7 +13,7 @@ import (
 // A search magpie asked a search API for (axelburks on Discord: 用量-请求
 // 页面 能看到请求记录 但是无请求存档) is a row of the Requests page with the
 // route the Routing page lists it under and the archive that keeps its
-// request and answer, which the row's detail opens (View routing, the
+// request and answer, which the row's detail opens (the route link, the
 // archive panel), though it rides the probes' lane.
 func TestSearchRowKeepsRouteAndArchive(t *testing.T) {
 	sandboxHome(t)
