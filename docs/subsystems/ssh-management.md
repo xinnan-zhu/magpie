@@ -220,6 +220,14 @@ existing behavior.
 
 ## Compatibility, recovery and verification
 
+The public `magpie ssh` CLI lists/adds/removes hosts, inspects a destination,
+uploads an offline binary, manages its service and opens Web. Editing a saved
+host's port/path, downloading and starting in one click, and connection-bound
+agent/tunnel/copy operations currently use the desktop page. The `/api/ssh`
+peer endpoints are context-bound control protocol, not public CLI commands.
+The CLI route inventory records these boundaries rather than treating ordinary
+local agent commands as equivalent to a remote serving context.
+
 The first version requires this SSH protocol on both ends, system OpenSSH,
 and an authenticated loopback user daemon. Deployment and reverse listener
 verification support Linux; an already compatible macOS daemon can be managed

@@ -119,11 +119,18 @@ const (
 	// usage`, `quota` and `sessions`, stage 3
 	U = "stage 3: usage, sessions and traces"
 	// A: connecting agents and the rest, stage 3
-	A = "stage 3: agents and the rest"
+	A       = "stage 3: agents and the rest"
+	SSH     = "SSH agent/tunnel/copy operations have no public CLI yet; magpie ssh web opens remote management"
+	SSHPeer = "SSH control protocol bound to the serving context, not a public CLI"
 )
 
 // cliForRoute is the command that does what a route does, as `magpie …`.
 var cliForRoute = map[string]string{
+	"GET /api/ssh/hosts":                     "magpie ssh hosts",
+	"DELETE /api/ssh/hosts/{id}":             "magpie ssh remove",
+	"POST /api/ssh/connections/{id}/service": "magpie ssh service",
+	"POST /api/ssh/connections/{id}/web":     "magpie ssh web",
+
 	"GET /api/agent-models/{id}":           "magpie models",
 	"GET /api/settings":                    "magpie settings list",
 	"POST /api/settings":                   "magpie settings set",
@@ -164,6 +171,29 @@ var cliForRoute = map[string]string{
 }
 
 var notYet = map[string]string{
+	"GET /api/ssh/config-hosts":                     "the desktop's alias picker; magpie ssh accepts an alias directly",
+	"POST /api/ssh/hosts":                           "magpie ssh add creates a host; editing ports and binary paths is desktop-only",
+	"POST /api/ssh/connections":                     W, // the window's retained connection id
+	"DELETE /api/ssh/connections/{id}":              W,
+	"POST /api/ssh/connections/{id}/deploy":         "magpie ssh install uploads an offline binary; one-click download/install/start is desktop-only",
+	"GET /api/ssh/connections/{id}/agents":          SSH,
+	"GET /api/ssh/connections/{id}/preview/{agent}": SSH,
+	"POST /api/ssh/connections/{id}/agent":          SSH,
+	"POST /api/ssh/connections/{id}/pick":           SSH,
+	"POST /api/ssh/connections/{id}/tunnel":         SSH,
+	"GET /api/ssh/copy-choices":                     SSH,
+	"POST /api/ssh/connections/{id}/copy/preview":   SSH,
+	"POST /api/ssh/connections/{id}/copy/apply":     SSH,
+	"GET /api/ssh/context":                          SSHPeer,
+	"GET /api/ssh/agents":                           SSHPeer,
+	"GET /api/ssh/preview/{id}":                     SSHPeer,
+	"POST /api/ssh/agent":                           SSHPeer,
+	"POST /api/ssh/pick":                            SSHPeer,
+	"GET /api/ssh/transfer":                         SSHPeer,
+	"POST /api/ssh/transfer/plan":                   SSHPeer,
+	"POST /api/ssh/transfer/apply":                  SSHPeer,
+	"POST /api/ssh/upstream":                        SSHPeer,
+
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go
 	"GET /api/agents/cli":                        A,  // api.go
