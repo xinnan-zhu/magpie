@@ -21,56 +21,65 @@ func TestBlockedConfigIsRepairedInOneClick(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root writes any folder")
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	dotConfig := filepath.Join(home, ".config")
-	if err := os.Mkdir(dotConfig, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(dotConfig, 0o755) })
-	h := Handler(nil, nil)
-	call := func(method, path, body string) (int, string) {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-		return rec.Code, rec.Body.String()
-	}
-	const add = `{"id":"mine","name":"Mine","chat":"http://127.0.0.1:1/v1","key":"sk-a","models":["m1"],"new":true}`
+	for _, folder := range []string{".config", ".config/magpie"} {
+		t.Run(folder, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+			dotConfig := filepath.Join(home, ".config")
+			blocked := filepath.Join(home, folder)
+			want := "~/" + folder
+			if err := os.MkdirAll(filepath.Dir(blocked), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(blocked, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(blocked, 0o755) })
+			h := Handler(nil, nil)
+			call := func(method, path, body string) (int, string) {
+				t.Helper()
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
+				return rec.Code, rec.Body.String()
+			}
+			const add = `{"id":"mine","name":"Mine","chat":"http://127.0.0.1:1/v1","key":"sk-a","models":["m1"],"new":true}`
 
-	code, body := call("POST", "/api/provider/save", add)
-	var failed struct{ Error, Code, Blocked string }
-	json.Unmarshal([]byte(body), &failed)
-	if code == 200 {
-		t.Fatalf("save into a folder the user can't write went through: %s", body)
-	}
-	if failed.Code != "config_blocked" || failed.Blocked != "~/.config" {
-		t.Fatalf("failed save = %d %s; want code config_blocked naming ~/.config, so the window can offer Repair", code, body)
-	}
-	_, body = call("GET", "/api/state", "")
-	var s struct {
-		ConfigBlocked string `json:"configBlocked"`
-	}
-	json.Unmarshal([]byte(body), &s)
-	if s.ConfigBlocked != "~/.config" {
-		t.Fatalf("state configBlocked = %q, want ~/.config", s.ConfigBlocked)
-	}
+			code, body := call("POST", "/api/provider/save", add)
+			var failed struct{ Error, Code, Blocked string }
+			json.Unmarshal([]byte(body), &failed)
+			if code == 200 {
+				t.Fatalf("save into a folder the user can't write went through: %s", body)
+			}
+			if failed.Code != "config_blocked" || failed.Blocked != want {
+				t.Fatalf("failed save = %d %s; want code config_blocked naming %s, so the window can offer Repair", code, body, want)
+			}
+			_, body = call("GET", "/api/state", "")
+			var s struct {
+				ConfigBlocked string `json:"configBlocked"`
+			}
+			json.Unmarshal([]byte(body), &s)
+			if s.ConfigBlocked != want {
+				t.Fatalf("state configBlocked = %q, want %s", s.ConfigBlocked, want)
+			}
 
-	if code, body := call("POST", "/api/config/repair", "{}"); code != 204 {
-		t.Fatalf("repair: %d %s", code, body)
-	}
-	if code, body := call("POST", "/api/provider/save", add); code != 200 {
-		t.Fatalf("save after repair: %d %s", code, body)
-	}
-	if _, err := os.Stat(filepath.Join(dotConfig, "magpie", "providers.json")); err != nil {
-		t.Fatalf("the provider isn't in ~/.config/magpie, where every reader looks: %v", err)
-	}
-	_, body = call("GET", "/api/state", "")
-	s.ConfigBlocked = ""
-	json.Unmarshal([]byte(body), &s)
-	if s.ConfigBlocked != "" {
-		t.Fatalf("state configBlocked = %q after repair, want empty", s.ConfigBlocked)
+			if code, body := call("POST", "/api/config/repair", "{}"); code != 204 {
+				t.Fatalf("repair: %d %s", code, body)
+			}
+			if code, body := call("POST", "/api/provider/save", add); code != 200 {
+				t.Fatalf("save after repair: %d %s", code, body)
+			}
+			if _, err := os.Stat(filepath.Join(dotConfig, "magpie", "providers.json")); err != nil {
+				t.Fatalf("the provider isn't in ~/.config/magpie, where every reader looks: %v", err)
+			}
+			_, body = call("GET", "/api/state", "")
+			s.ConfigBlocked = ""
+			json.Unmarshal([]byte(body), &s)
+			if s.ConfigBlocked != "" {
+				t.Fatalf("state configBlocked = %q after repair, want empty", s.ConfigBlocked)
+			}
+		})
 	}
 }
 

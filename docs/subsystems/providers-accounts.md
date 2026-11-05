@@ -434,6 +434,9 @@ selection, with credentials opt-in and new remapped IDs. It keeps subscriptions
 and machine settings out. Import receipts and configuration revisions live in
 providers.json; all stores compare the revision read under its strict file
 lock, so a stale writer now returns an error instead of replacing another
-process's edit. A managed SSH Remote Magpie provider's `SSHSource` identifies
-its originating machine/context and host entry. Reconnect changes its key only
+process's edit. A lock failure writes nothing and preserves its operating-system
+error ([`filelock.LockStrict`](../../internal/filelock/filelock.go)), so a
+permission refusal still reaches the GUI's
+existing `config_blocked` repair flow. A managed SSH Remote Magpie provider's
+`SSHSource` identifies its originating machine/context and host entry. Reconnect changes its key only
 when source and endpoints still match, preserving the user's model picks.

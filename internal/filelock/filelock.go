@@ -5,6 +5,7 @@ package filelock
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -30,32 +31,43 @@ var mkdirAll = os.MkdirAll
 // held is false when it went on without the lock: on a file system
 // without locks, or after wait.
 func Lock(path string, wait time.Duration) (unlock func(), held bool) {
+	unlock, err := LockStrict(path, wait)
+	return unlock, err == nil
+}
+
+// LockStrict takes the same lock as Lock, but keeps the reason it could not
+// be taken. Callers that require the lock must return the error before writing.
+// The returned unlock is safe to call even when the lock could not be taken.
+func LockStrict(path string, wait time.Duration) (unlock func(), err error) {
 	// the folder is made only when the file can't be opened for want of
 	// it: made first, each lock asked the system for the folder too, on
 	// every take (#1665: ~190 times in a Windows start's first 25s, each
 	// an antivirus filter driver's work)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if errors.Is(err, fs.ErrNotExist) {
-		mkdirAll(filepath.Dir(path), 0o700)
+		if err := mkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return func() {}, err
+		}
 		f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	}
 	if err != nil {
-		return func() {}, false // no lock to be had here: no file to change either
+		return func() {}, err // no lock to be had here: no file to change either
 	}
 	start := time.Now()
 	for {
 		got, err := TryLock(f)
 		if err != nil { // a file system without locks, as an NFS home with no lockd
 			f.Close()
-			return func() {}, false
+			return func() {}, err
 		}
 		if got {
-			return func() { Unlock(f); f.Close() }, true
+			return func() { Unlock(f); f.Close() }, nil
 		}
 		if time.Since(start) > wait {
 			f.Close()
-			log.Printf("%s: another magpie held it for %v; going on without it", path, wait)
-			return func() {}, false
+			err := fmt.Errorf("%s: another magpie held it for %v; lock not taken", path, wait)
+			log.Print(err)
+			return func() {}, err
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

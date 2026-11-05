@@ -771,10 +771,10 @@ func Routings() ([]string, error) {
 // file cut short.
 func store(f file) error {
 	p := Path()
-	unlock, held := filelock.Lock(p+".lock", filelock.Wait)
+	unlock, err := filelock.LockStrict(p+".lock", filelock.Wait)
 	defer unlock()
-	if !held {
-		return errors.New("cannot lock providers.json; no changes written")
+	if err != nil {
+		return fmt.Errorf("cannot lock providers.json; no changes written: %w", err)
 	}
 	if f.revision != "" {
 		b, err := os.ReadFile(p)
